@@ -1,0 +1,1 @@
+DROP TABLE governance_mediator_timeout;

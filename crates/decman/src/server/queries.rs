@@ -45,6 +45,7 @@ use super::{
         AcsCursor, FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
         for_each_active_contract, page_active_contracts,
     },
+    ledger_rejection::canton_error_id,
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
@@ -54,8 +55,9 @@ use super::{
         CredentialInfo, CredentialOfferInfo, DomainConfirmation, DomainGovernanceAction,
         GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
         PartyMetadata, PendingAction, ProposalSummary, ProviderConfigurationInfo,
-        ProviderServiceInfo, RegistrarServiceInfo, RegistrarServiceRequestInfo, TokenRequestInfo,
-        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
+        ProviderServiceInfo, RegistrarServiceInfo, RegistrarServiceRequestInfo, StuckReason,
+        TokenRequestInfo, TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
+        UserServiceInfo,
     },
 };
 
@@ -530,6 +532,8 @@ where
 /// scrolling does not re-read them.
 ///
 /// `rules` is the live rules contract, or `None` when it could not be read.
+/// `timeouts` is this node's expire evidence. A first batch uses it to find
+/// the orphans that cannot be archived when the proposals span several pages.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
@@ -540,6 +544,7 @@ pub async fn get_governance_confirmations(
     packages: &PackageConfig,
     limit: usize,
     cursor: Option<AcsCursor>,
+    timeouts: &ExpireTimeouts,
 ) -> Result<GovernanceQueue> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
@@ -547,13 +552,8 @@ pub async fn get_governance_confirmations(
     // Collect domain confirmations grouped by proposal CID (core domain actions)
     let mut domain_confirmations: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> =
         HashMap::new();
-    // Map of `contract_id -> ProposalInfo` for every active
-    // `GovernableAction` proposal visible to this party on this participant.
-    // The presence of a key here is what gates inclusion in `domain_actions`
-    // below — `Confirmation`s referencing a proposal that's no longer active
-    // (or never reached this participant's ACS) get filtered out, otherwise
-    // surfacing them in the notification queue gives the user a Confirm
-    // button that always 500s with `CONTRACT_NOT_FOUND` on the proposal cid.
+    // Active proposals in this ACS batch. Only an exhausted first batch can
+    // prove that a confirmation's missing proposal has been archived.
     let mut proposal_infos: HashMap<String, ProposalInfo> = HashMap::new();
     // Whether `proposal_infos` reflects the full active-proposal set
     // for this party on this participant. If the proposal fetch errored we
@@ -570,20 +570,31 @@ pub async fn get_governance_confirmations(
     let mut domain_confirmations_complete = true;
 
     // Bounded, not cached: see read_domain_confirmations.
-    let cached = match read_domain_confirmations(config, party_id, token.clone(), packages).await {
-        Ok(read) => read,
-        Err(e) => {
-            tracing::warn!("Could not read confirmations: {e}");
-            domain_confirmations_complete = false;
-            (HashMap::new(), HashMap::new())
-        }
-    };
+    let (cached, confirmations_capped) =
+        match read_domain_confirmations(config, party_id, token.clone(), packages).await {
+            Ok(read) => read,
+            Err(e) => {
+                tracing::warn!("Could not read confirmations: {e}");
+                domain_confirmations_complete = false;
+                ((HashMap::new(), HashMap::new()), false)
+            }
+        };
+    if confirmations_capped {
+        tracing::warn!(
+            %party_id,
+            "The confirmation read stopped at {MAX_CONFIRMATIONS_SCANNED} contracts, so no \
+             action is marked as one that cannot be archived"
+        );
+    }
     confirmations_by_hash.extend(cached.0.clone());
 
     // One batch of proposals, not the party's whole history.
+    let first_page = cursor.is_none();
+    // A node without the `GovernableAction` interface has no proposals to
+    // read. That is a complete read, not a failed one.
     let mut proposals_read_ok = true;
     let (batch, next_cursor) =
-        match page_proposal_infos(config, party_id, token, packages, limit, cursor).await {
+        match page_proposal_infos(config, party_id, token.clone(), packages, limit, cursor).await {
             Ok(page) => page,
             Err(e) => {
                 // Warn, not debug: this drops every unconfirmed card from the page,
@@ -596,18 +607,83 @@ pub async fn get_governance_confirmations(
     let proposal_infos_complete = proposals_read_ok;
     proposal_infos.extend(batch);
 
-    // Only the confirmations belonging to this batch, so a card's count matches
-    // the proposal beside it rather than the whole party's set.
-    domain_confirmations.extend(
-        proposal_infos
-            .keys()
-            .filter_map(|cid| cached.1.get(cid).map(|v| (cid.clone(), v.clone()))),
-    );
-
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+
+    // With several pages of proposals, no single page proves that a
+    // confirmation's proposal is gone. An orphan that cannot be archived must
+    // still reach the operator, so the first page checks such orphans against
+    // every active proposal id. Only marked orphans start that scan. It runs
+    // on every first-page read while one exists, and the web UI reads the
+    // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
+    // of FETCH_CHUNK ids, and then leaves the orphans out. A scan that fails
+    // leaves them out too, so the batch is then incomplete. An orphan is
+    // marked on each party's newest confirmation, as the listed action is.
+    let mut gone = HashSet::new();
+    let mut orphan_scan_ok = true;
+    if first_page
+        && next_cursor.is_some()
+        && proposals_read_ok
+        && !confirmations_capped
+        && decman_lib::catalog::templates::governable_action_interface(packages).is_ok()
+    {
+        let marked: Vec<&String> = cached
+            .1
+            .iter()
+            .filter(|(cid, (_, confirmations))| {
+                let newest = interpret::dedupe_newest_per_party(
+                    confirmations.iter().collect(),
+                    |c| &c.confirming_party,
+                    |c| c.created_at,
+                );
+                !proposal_infos.contains_key(*cid)
+                    && !newest.is_empty()
+                    && newest.iter().all(|c| {
+                        is_stuck(
+                            &c.contract_id,
+                            &c.confirming_party,
+                            c.expires_at,
+                            timeouts,
+                            now_seconds,
+                        )
+                    })
+            })
+            .map(|(cid, _)| cid)
+            .collect();
+        if !marked.is_empty() {
+            match active_proposal_ids(config, party_id, token, packages).await {
+                Ok(Some(active)) => {
+                    gone = marked
+                        .into_iter()
+                        .filter(|cid| !active.contains(*cid))
+                        .cloned()
+                        .collect();
+                }
+                Ok(None) => tracing::warn!(
+                    %party_id,
+                    "Leaving {} marked orphans out: the active proposals fill more than \
+                     {MAX_ORPHAN_SCAN_PAGES} pages",
+                    marked.len()
+                ),
+                Err(e) => {
+                    tracing::warn!("Could not check the proposals of marked orphans: {e:#}");
+                    orphan_scan_ok = false;
+                }
+            }
+        }
+    }
+
+    domain_confirmations.extend(domain_confirmations_for_batch(
+        cached.1,
+        &proposal_infos,
+        first_page,
+        next_cursor.is_some(),
+        proposals_read_ok,
+        packages,
+        &gone,
+    ));
 
     let members: Option<HashSet<CantonId>> =
         rules.map(|rules| rules.members.iter().cloned().collect());
@@ -635,7 +711,8 @@ pub async fn get_governance_confirmations(
         actions,
         domain_actions,
         next_cursor,
-        complete: proposal_infos_complete && domain_confirmations_complete,
+        complete: proposal_infos_complete && domain_confirmations_complete && orphan_scan_ok,
+        confirmations_capped,
     })
 }
 
@@ -647,6 +724,70 @@ pub struct GovernanceQueue {
     /// False when a read behind the batch failed and left cards out. A caller
     /// that counts the queue must not take an incomplete batch as empty.
     pub complete: bool,
+    /// True when the confirmation read reached [`MAX_CONFIRMATIONS_SCANNED`].
+    /// It may have left out a live confirmation, so the batch gives no
+    /// "cannot be archived" marks.
+    pub confirmations_capped: bool,
+}
+
+/// The parties each confirmation's latest expire attempt named as
+/// unresponsive, keyed by confirmation contract id.
+pub(crate) type ExpireTimeouts = HashMap<String, HashSet<String>>;
+
+/// Whether a confirmation has expired and the latest expire attempt on this
+/// node timed out naming its confirmer.
+fn is_stuck(
+    contract_id: &str,
+    confirmer: &CantonId,
+    expires_at: i64,
+    timeouts: &ExpireTimeouts,
+    now: i64,
+) -> bool {
+    let expired = expires_at > 0 && expires_at <= now;
+    expired
+        && timeouts
+            .get(contract_id)
+            .is_some_and(|unresponsive| unresponsive.contains(&confirmer.to_string()))
+}
+
+/// Marks the expired confirmations that cannot be archived, then drops the
+/// orphaned domain actions that can.
+///
+/// A confirmation is stuck only on evidence: it has expired, and the latest
+/// expire attempt on this node timed out at the mediator naming its confirmer.
+/// Being a former member is no such evidence: its participant may still be
+/// online and confirm the archive. The actions hold each party's newest
+/// confirmation only. An older one from the same party needs the same
+/// participant, so the newest one decides.
+///
+/// An orphan's proposal is gone, so nobody can act on it. It stays listed only
+/// when it cannot be archived, so the operator can hide it.
+pub(crate) fn mark_stuck(
+    actions: &mut [GovernanceAction],
+    domain_actions: &mut Vec<DomainGovernanceAction>,
+    timeouts: &ExpireTimeouts,
+    now: i64,
+) {
+    let reason = |contract_id: &str, confirmer: &CantonId, expires_at: i64| {
+        is_stuck(contract_id, confirmer, expires_at, timeouts, now)
+            .then_some(StuckReason::ParticipantUnresponsive)
+    };
+    for action in actions {
+        for c in &mut action.confirmations {
+            c.stuck = reason(&c.contract_id, &c.confirming_party, c.expires_at);
+        }
+        action.cannot_be_archived = !action.confirmations.is_empty()
+            && action.confirmations.iter().all(|c| c.stuck.is_some());
+    }
+    for action in domain_actions.iter_mut() {
+        for c in &mut action.confirmations {
+            c.stuck = reason(&c.contract_id, &c.confirming_party, c.expires_at);
+        }
+        action.cannot_be_archived = action.orphaned
+            && !action.confirmations.is_empty()
+            && action.confirmations.iter().all(|c| c.stuck.is_some());
+    }
+    domain_actions.retain(|action| !action.orphaned || action.cannot_be_archived);
 }
 
 /// Map an assembled domain proposal onto the wire DTO.
@@ -660,6 +801,7 @@ fn domain_action_dto(
 ) -> DomainGovernanceAction {
     let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
     DomainGovernanceAction {
+        cannot_be_archived: false,
         proposal_cid: action.proposal_cid,
         action_label: action.action_label,
         description: action.description,
@@ -745,6 +887,7 @@ fn assemble_self_actions(
                 .max()
                 .unwrap_or(0);
             GovernanceAction {
+                cannot_be_archived: false,
                 action_hash,
                 action,
                 confirmations: unique_confirmations
@@ -763,6 +906,7 @@ fn assemble_self_actions(
 /// Map a parsed confirmation onto the wire DTO.
 fn confirmation_dto(parsed: ParsedConfirmation) -> GovernanceConfirmation {
     GovernanceConfirmation {
+        stuck: None,
         contract_id: parsed.contract_id,
         action: parsed.action,
         confirming_party: parsed.confirming_party,
@@ -775,6 +919,7 @@ fn confirmation_dto(parsed: ParsedConfirmation) -> GovernanceConfirmation {
 /// confirmation carries no action, and neither does the DTO.
 fn domain_confirmation_dto(parsed: ParsedDomainConfirmation) -> DomainConfirmation {
     DomainConfirmation {
+        stuck: None,
         contract_id: parsed.contract_id,
         confirming_party: parsed.confirming_party,
         created_at: parsed.created_at,
@@ -782,7 +927,8 @@ fn domain_confirmation_dto(parsed: ParsedDomainConfirmation) -> DomainConfirmati
     }
 }
 
-/// Fetch governance confirmations for a specific template
+/// Fetch governance confirmations for a specific template. Returns whether
+/// the read reached [`MAX_CONFIRMATIONS_SCANNED`].
 async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
@@ -790,19 +936,21 @@ async fn fetch_governance_for_template(
     template: &decman_lib::framework::TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
-) -> Result {
+) -> Result<bool> {
     let event_format = party_event_format(
         party_id,
         vec![template_filter(template.into(), false)],
         true,
     );
 
+    let mut seen = 0usize;
     for_each_active_contract(
         config,
         token,
         event_format,
         Some(MAX_CONFIRMATIONS_SCANNED),
         |created| {
+            seen += 1;
             if created.template_id.as_ref().is_some_and(|t| {
                 t.module_name == "Governance.Confirmation"
                     && t.entity_name == "GovernanceConfirmation"
@@ -832,7 +980,7 @@ async fn fetch_governance_for_template(
     )
     .await?;
 
-    Ok(())
+    Ok(seen >= MAX_CONFIRMATIONS_SCANNED)
 }
 
 /// Resolve each `TransferInstruction` cid captured on
@@ -958,10 +1106,98 @@ async fn page_proposal_infos(
 /// self-management ones keyed by action hash.
 type ParsedConfirmations = (
     HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
-    HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
+    DomainConfirmations,
 );
 
-/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`].
+type DomainConfirmations = HashMap<String, (String, Vec<ParsedDomainConfirmation>)>;
+
+/// Missing proposals prove orphanhood only after a successful complete read.
+/// Off-page proposals and unconfigured interfaces provide no such evidence.
+/// `gone` holds proposals that a scan of every active id proved gone.
+fn domain_confirmations_for_batch(
+    confirmations: DomainConfirmations,
+    proposals: &HashMap<String, ProposalInfo>,
+    first_page: bool,
+    has_next_page: bool,
+    read_ok: bool,
+    packages: &PackageConfig,
+    gone: &HashSet<String>,
+) -> DomainConfirmations {
+    let include_orphans = first_page
+        && !has_next_page
+        && read_ok
+        && decman_lib::catalog::templates::governable_action_interface(packages).is_ok();
+    confirmations
+        .into_iter()
+        .filter(|(cid, _)| include_orphans || proposals.contains_key(cid) || gone.contains(cid))
+        .collect()
+}
+
+/// The most pages of [`FETCH_CHUNK`] proposal ids that one read scans for
+/// marked orphans.
+const MAX_ORPHAN_SCAN_PAGES: usize = 10;
+
+/// The ids of every active proposal of `party_id`, read [`FETCH_CHUNK`] at a
+/// time. `None` when the proposals fill more than [`MAX_ORPHAN_SCAN_PAGES`]
+/// such pages.
+async fn active_proposal_ids(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Option<HashSet<String>>> {
+    let template = decman_lib::catalog::templates::governable_action_interface(packages)?;
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter((&template).into(), false)],
+        false,
+    );
+    let mut ids = HashSet::new();
+    let mut cursor = None;
+    for _ in 0..MAX_ORPHAN_SCAN_PAGES {
+        let (page, next) = page_active_contracts(
+            config,
+            token.clone(),
+            event_format.clone(),
+            FETCH_CHUNK as usize,
+            cursor,
+            |created| Some(created.contract_id),
+        )
+        .await?;
+        ids.extend(page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(Some(ids)),
+        }
+    }
+    Ok(None)
+}
+
+/// The Canton error ids that mean a template is not on this participant:
+/// its package name is not uploaded, or the package is but lacks the
+/// template. The other template readers in this module skip both as well.
+const ABSENT_TEMPLATE_ERRORS: [&str; 2] = [
+    "PACKAGE_NAMES_NOT_FOUND",
+    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME",
+];
+
+/// Optional packages and templates can be absent. Other failures leave a
+/// read incomplete.
+fn allow_absent_confirmation_package<T: Default>(result: Result<T>) -> Result<T> {
+    match result {
+        Err(error)
+            if canton_error_id(&error)
+                .is_some_and(|id| ABSENT_TEMPLATE_ERRORS.contains(&id.as_str())) =>
+        {
+            Ok(T::default())
+        }
+        other => other,
+    }
+}
+
+/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`]
+/// for each template. Also says whether a template's read reached that bound,
+/// and so may have left confirmations out.
 ///
 /// Deliberately uncached. These are small — a few hundred bytes each — and a
 /// confirmation has to show up on the next read, not once a TTL lapses: caching
@@ -972,27 +1208,25 @@ async fn read_domain_confirmations(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<ParsedConfirmations> {
+) -> Result<(ParsedConfirmations, bool)> {
     let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
     let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
+    let mut capped = false;
     for t in &decman_lib::catalog::templates::governance_templates(packages) {
-        // A template this participant lacks means "no confirmations of that
-        // kind", not a failed read.
-        if let Err(e) = fetch_governance_for_template(
-            config,
-            party_id,
-            token.clone(),
-            t,
-            &mut by_hash,
-            &mut domain,
-        )
-        .await
-        {
-            tracing::debug!(%party_id, "confirmation read skipped {}:{}: {e}", t.module, t.entity);
-        }
+        capped |= allow_absent_confirmation_package(
+            fetch_governance_for_template(
+                config,
+                party_id,
+                token.clone(),
+                t,
+                &mut by_hash,
+                &mut domain,
+            )
+            .await,
+        )?;
     }
 
-    Ok((by_hash, domain))
+    Ok(((by_hash, domain), capped))
 }
 
 /// One batch of a party's open proposals, plus where to resume.
@@ -1041,6 +1275,7 @@ pub async fn page_proposal_summaries(
         .unwrap_or(0);
     let confirmations = read_domain_confirmations(config, party_id, token_for_counts, packages)
         .await
+        .map(|(read, _)| read)
         .unwrap_or_default();
     let summaries = summaries
         .into_iter()
@@ -4412,5 +4647,389 @@ mod tests {
             "an orphan omits both fields on the wire: {wire}"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod domain_confirmation_page_tests {
+    use super::*;
+    use crate::config::default_package_config;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn confirmation(proposal_cid: &str) -> (String, (String, Vec<ParsedDomainConfirmation>)) {
+        (
+            proposal_cid.to_string(),
+            (
+                "GenericVote".to_string(),
+                vec![ParsedDomainConfirmation {
+                    contract_id: format!("{proposal_cid}-confirmation"),
+                    proposal_cid: proposal_cid.to_string(),
+                    action_label: "GenericVote".to_string(),
+                    confirming_party: CantonId::parse(&format!("former::1220{}", "ab".repeat(32)))
+                        .expect("valid party"),
+                    created_at: 1,
+                    expires_at: NOW - 1,
+                }],
+            ),
+        )
+    }
+
+    /// The orphans of a complete single-page read, marked against `timeouts`.
+    fn orphans_marked_with(timeouts: &ExpireTimeouts) -> Vec<DomainGovernanceAction> {
+        let selected = domain_confirmations_for_batch(
+            HashMap::from([confirmation("00archived")]),
+            &HashMap::new(),
+            true,
+            false,
+            true,
+            &default_package_config(),
+            &HashSet::new(),
+        );
+        let mut actions: Vec<_> =
+            interpret::assemble_domain_actions(selected, HashMap::new(), true, true, 2, None, NOW)
+                .into_iter()
+                .map(|action| domain_action_dto(action, None))
+                .collect();
+        mark_stuck(&mut [], &mut actions, timeouts, NOW);
+        actions
+    }
+
+    #[test]
+    fn an_orphan_that_cannot_be_archived_is_listed() {
+        let timeouts = HashMap::from([(
+            "00archived-confirmation".to_string(),
+            HashSet::from([format!("former::1220{}", "ab".repeat(32))]),
+        )]);
+
+        let actions = orphans_marked_with(&timeouts);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].proposal_cid, "00archived");
+        assert!(actions[0].orphaned);
+        assert!(actions[0].cannot_be_archived);
+        assert!(!actions[0].can_execute);
+    }
+
+    /// #425 took orphans out of the list: their proposal is gone, so nobody
+    /// can confirm or execute them.
+    #[test]
+    fn an_orphan_that_can_be_archived_stays_out_of_the_list() {
+        assert!(orphans_marked_with(&HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn an_active_proposal_outside_the_current_page_is_never_shown_as_an_orphan() {
+        for (first_page, has_next_page) in [(true, true), (false, false)] {
+            let proposals = HashMap::from([("00visible".to_string(), ProposalInfo::default())]);
+            let selected = domain_confirmations_for_batch(
+                HashMap::from([confirmation("00visible"), confirmation("00other-page")]),
+                &proposals,
+                first_page,
+                has_next_page,
+                true,
+                &default_package_config(),
+                &HashSet::new(),
+            );
+
+            let actions =
+                interpret::assemble_domain_actions(selected, proposals, true, true, 2, None, NOW);
+
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].proposal_cid, "00visible");
+            assert!(!actions[0].orphaned);
+        }
+    }
+
+    #[test]
+    fn a_failed_or_unconfigured_proposal_read_cannot_prove_orphanhood() {
+        let mut unconfigured = default_package_config();
+        unconfigured.governance_action = None;
+        for (read_ok, packages) in [(false, default_package_config()), (true, unconfigured)] {
+            let selected = domain_confirmations_for_batch(
+                HashMap::from([confirmation("00unknown")]),
+                &HashMap::new(),
+                true,
+                false,
+                read_ok,
+                &packages,
+                &HashSet::new(),
+            );
+
+            assert!(selected.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_absent_optional_confirmation_package_is_not_a_read_failure() {
+        let absent = anyhow::Error::new(tonic::Status::not_found(
+            "PACKAGE_NAMES_NOT_FOUND(11,abc): optional package is not uploaded",
+        ))
+        .context("reading confirmations");
+
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
+        assert!(allow_absent_confirmation_package(Ok(())).is_ok());
+    }
+
+    /// Canton answers this when the package name is uploaded but holds no
+    /// such template, for example an older version of the package.
+    #[test]
+    fn a_template_missing_from_a_present_package_is_not_a_read_failure() {
+        let absent = anyhow::Error::new(tonic::Status::invalid_argument(
+            "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,abc): no template \
+             Governance.Confirmation:GovernanceConfirmation in package governance-core",
+        ))
+        .context("reading confirmations");
+
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
+    }
+
+    #[test]
+    fn other_confirmation_read_failures_are_propagated() {
+        for error in [
+            anyhow::Error::new(tonic::Status::unavailable("participant unavailable")),
+            anyhow::Error::new(tonic::Status::permission_denied("not authorized")),
+            anyhow::anyhow!("PACKAGE_NAMES_NOT_FOUND: not a ledger rejection"),
+        ] {
+            let expected = format!("{error:#}");
+
+            let error = allow_absent_confirmation_package::<()>(Err(error))
+                .expect_err("a failed confirmation read must not return a partial result");
+
+            assert_eq!(format!("{error:#}"), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod stuck_tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn member() -> CantonId {
+        CantonId::parse(&format!("member::1220{}", "ab".repeat(32))).expect("valid party")
+    }
+
+    fn other_member() -> CantonId {
+        CantonId::parse(&format!("other::1220{}", "cd".repeat(32))).expect("valid party")
+    }
+
+    /// The latest expire of each of `contract_ids` timed out naming `party`.
+    fn timed_out(contract_ids: &[&str], party: &CantonId) -> ExpireTimeouts {
+        contract_ids
+            .iter()
+            .map(|cid| (cid.to_string(), HashSet::from([party.to_string()])))
+            .collect()
+    }
+
+    fn self_action(expiries: &[i64]) -> GovernanceAction {
+        let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
+        GovernanceAction {
+            action_hash: "hash".to_string(),
+            action: action.clone(),
+            confirmations: expiries
+                .iter()
+                .enumerate()
+                .map(|(i, &expires_at)| GovernanceConfirmation {
+                    contract_id: format!("c{i}"),
+                    action: action.clone(),
+                    confirming_party: member(),
+                    created_at: 1,
+                    expires_at,
+                    stuck: None,
+                })
+                .collect(),
+            confirmation_count: 0,
+            executable_confirmation_cids: vec![],
+            can_execute: false,
+            last_confirmation_at: 1,
+            cannot_be_archived: false,
+        }
+    }
+
+    fn domain_action(orphaned: bool, expiries: &[i64]) -> DomainGovernanceAction {
+        DomainGovernanceAction {
+            proposal_cid: "proposal".to_string(),
+            action_label: "GenericVote".to_string(),
+            description: None,
+            confirmations: expiries
+                .iter()
+                .enumerate()
+                .map(|(i, &expires_at)| DomainConfirmation {
+                    contract_id: format!("c{i}"),
+                    confirming_party: member(),
+                    created_at: 1,
+                    expires_at,
+                    stuck: None,
+                })
+                .collect(),
+            confirmation_count: 0,
+            executable_confirmation_cids: vec![],
+            can_execute: false,
+            orphaned,
+            transfer_details: None,
+            accept_transfer_details: None,
+            service_request_details: None,
+            proposer: None,
+            proposer_not_authorized: false,
+            created_at: None,
+            proposal_template_id: None,
+            proposal_payload: None,
+            cannot_be_archived: false,
+        }
+    }
+
+    #[test]
+    fn an_expired_confirmation_whose_expire_timed_out_naming_its_confirmer_is_stuck() {
+        let mut actions = [self_action(&[NOW - 1])];
+        let mut domains = vec![domain_action(true, &[NOW])];
+
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0"], &member()),
+            NOW,
+        );
+
+        assert_eq!(
+            actions[0].confirmations[0].stuck,
+            Some(StuckReason::ParticipantUnresponsive)
+        );
+        assert_eq!(
+            domains[0].confirmations[0].stuck,
+            Some(StuckReason::ParticipantUnresponsive)
+        );
+        assert!(actions[0].cannot_be_archived);
+        assert!(domains[0].cannot_be_archived);
+    }
+
+    /// A former member's participant may still be online and confirm the
+    /// archive, so leaving the member set is no evidence on its own.
+    #[test]
+    fn an_expired_confirmation_without_a_timeout_is_not_stuck() {
+        let mut actions = [self_action(&[NOW])];
+        let mut domains = vec![domain_action(false, &[NOW - 1])];
+
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
+
+        assert_eq!(actions[0].confirmations[0].stuck, None);
+        assert_eq!(domains[0].confirmations[0].stuck, None);
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    /// The latest expire attempt wins. A timeout that names someone else, or
+    /// nobody, leaves this confirmer's participant unproven.
+    #[test]
+    fn a_timeout_that_does_not_name_the_confirmer_marks_nothing() {
+        for timeouts in [
+            timed_out(&["c0"], &other_member()),
+            HashMap::from([("c0".to_string(), HashSet::new())]),
+        ] {
+            let mut actions = [self_action(&[NOW - 1])];
+            let mut domains = vec![domain_action(false, &[NOW - 1])];
+
+            mark_stuck(&mut actions, &mut domains, &timeouts, NOW);
+
+            assert_eq!(actions[0].confirmations[0].stuck, None);
+            assert_eq!(domains[0].confirmations[0].stuck, None);
+            assert!(!actions[0].cannot_be_archived);
+        }
+    }
+
+    #[test]
+    fn live_and_unresolved_confirmations_are_never_stuck() {
+        let mut actions = [self_action(&[0, NOW + 1])];
+        let mut domains = vec![domain_action(false, &[0, NOW + 1])];
+
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0", "c1"], &member()),
+            NOW,
+        );
+
+        assert!(actions[0].confirmations.iter().all(|c| c.stuck.is_none()));
+        assert!(domains[0].confirmations.iter().all(|c| c.stuck.is_none()));
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn one_archivable_confirmation_keeps_the_action_archivable() {
+        let mut actions = [self_action(&[NOW - 1, NOW])];
+        let mut domains = vec![domain_action(false, &[NOW - 1, NOW])];
+
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0"], &member()),
+            NOW,
+        );
+
+        assert!(actions[0].confirmations[0].stuck.is_some());
+        assert!(domains[0].confirmations[0].stuck.is_some());
+        assert_eq!(actions[0].confirmations[1].stuck, None);
+        assert_eq!(domains[0].confirmations[1].stuck, None);
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn a_live_proposal_stays_archivable_even_when_all_its_confirmations_are_stuck() {
+        let mut domains = vec![domain_action(false, &[NOW - 1])];
+
+        mark_stuck(&mut [], &mut domains, &timed_out(&["c0"], &member()), NOW);
+
+        assert_eq!(
+            domains[0].confirmations[0].stuck,
+            Some(StuckReason::ParticipantUnresponsive)
+        );
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn an_orphan_stays_listed_only_while_it_cannot_be_archived() {
+        let mut domains = vec![domain_action(true, &[NOW - 1]), domain_action(true, &[NOW])];
+        domains[1].proposal_cid = "archivable".to_string();
+        domains[1].confirmations[0].contract_id = "c-archivable".to_string();
+
+        mark_stuck(&mut [], &mut domains, &timed_out(&["c0"], &member()), NOW);
+
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].proposal_cid, "proposal");
+        assert!(domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn an_empty_action_has_no_stuck_confirmations() {
+        let mut actions = [self_action(&[])];
+        let mut domains = vec![domain_action(false, &[])];
+
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
+
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn fresh_timeout_evidence_clears_old_marks() {
+        let mut actions = [self_action(&[NOW])];
+        let mut domains = vec![domain_action(false, &[NOW])];
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0"], &member()),
+            NOW,
+        );
+        assert!(actions[0].cannot_be_archived);
+
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
+
+        assert_eq!(actions[0].confirmations[0].stuck, None);
+        assert_eq!(domains[0].confirmations[0].stuck, None);
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
     }
 }

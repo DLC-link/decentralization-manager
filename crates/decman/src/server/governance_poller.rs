@@ -188,6 +188,7 @@ async fn read_queue(
             domain_actions: Vec::new(),
             next_cursor: None,
             complete: true,
+            confirmations_capped: false,
         });
     };
     let queue = get_governance_confirmations(
@@ -199,6 +200,8 @@ async fn read_queue(
         &pkgs,
         READ_LIMIT,
         None,
+        // Marks do not change the counts, so the poller reads no evidence.
+        &HashMap::new(),
     )
     .await?;
     anyhow::ensure!(queue.complete, "a ledger read behind the queue failed");
@@ -349,7 +352,10 @@ pub(crate) async fn run_governance_poller(data: web::Data<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use anyhow::Context;
 
@@ -359,6 +365,7 @@ mod tests {
         config::{KeycloakConfig, PackageConfig, PartyCredentials},
         server::{
             ledger_paging::AcsCursor,
+            queries::mark_stuck,
             types::{
                 ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
                 GovernanceConfirmation,
@@ -388,6 +395,7 @@ mod tests {
         let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
         let confirmer = party("member")?;
         let confirmation = |expires_at| GovernanceConfirmation {
+            stuck: None,
             contract_id: "00c".to_string(),
             action: action.clone(),
             confirming_party: confirmer.clone(),
@@ -395,6 +403,7 @@ mod tests {
             expires_at,
         };
         Ok(GovernanceAction {
+            cannot_be_archived: false,
             action_hash: "hash".to_string(),
             confirmations: expiries.iter().copied().map(confirmation).collect(),
             action: action.clone(),
@@ -412,12 +421,14 @@ mod tests {
     ) -> anyhow::Result<DomainGovernanceAction> {
         let confirmer = party("member")?;
         let confirmation = |expires_at| DomainConfirmation {
+            stuck: None,
             contract_id: "00c".to_string(),
             confirming_party: confirmer.clone(),
             created_at: 0,
             expires_at,
         };
         Ok(DomainGovernanceAction {
+            cannot_be_archived: false,
             proposal_cid: "00p".to_string(),
             action_label: "GenericVote".to_string(),
             description: None,
@@ -446,6 +457,7 @@ mod tests {
             domain_actions,
             next_cursor: None,
             complete: true,
+            confirmations_capped: false,
         }
     }
 
@@ -501,6 +513,24 @@ mod tests {
             vec![self_action(false, &[NOW - 10])?],
             vec![proposal(true, true, &[NOW + 60])?],
         );
+        assert_eq!(summarize(&q, NOW), PendingSummary::default());
+        Ok(())
+    }
+
+    #[test]
+    fn an_action_that_cannot_be_archived_is_not_pending() -> anyhow::Result<()> {
+        let mut q = queue(
+            vec![self_action(false, &[NOW])?],
+            vec![proposal(false, true, &[NOW - 1])?],
+        );
+        let timeouts = HashMap::from([(
+            "00c".to_string(),
+            HashSet::from([party("member")?.to_string()]),
+        )]);
+        mark_stuck(&mut q.actions, &mut q.domain_actions, &timeouts, NOW);
+        assert!(q.actions[0].cannot_be_archived);
+        assert!(q.domain_actions[0].cannot_be_archived);
+
         assert_eq!(summarize(&q, NOW), PendingSummary::default());
         Ok(())
     }

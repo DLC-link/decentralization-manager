@@ -52,19 +52,24 @@ use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
-    db::{rows::ChainAuditCacheRow, schema::SchemaRead},
+    db::{
+        rows::{ChainAuditCacheRow, GovernanceMediatorTimeoutRow},
+        schema::{SchemaRead, SchemaWrite},
+    },
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
         audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
-        ledger_rejection::{LedgerConnectionFailed, ReadTimedOut, submission_failure},
+        ledger_rejection::{
+            LedgerConnectionFailed, ReadTimedOut, mediator_timeout, submission_failure,
+        },
         middleware::require_admin,
         queries::{
-            GovernanceQueue, get_governance_confirmations,
-            get_governance_state as query_governance_state, resolve_contract_package_ref,
-            select_input_holdings,
+            ExpireTimeouts, GovernanceQueue, get_governance_confirmations,
+            get_governance_state as query_governance_state, mark_stuck,
+            resolve_contract_package_ref, select_input_holdings,
         },
         scan::{self, OpenMiningRound, ScanNotConfigured, ScanRefused},
         transfer_context::{
@@ -151,6 +156,16 @@ pub async fn get_governance(
         _ => None,
     };
 
+    let timeouts = match data.db.get_mediator_timeouts(party_id).await {
+        Ok(rows) => expire_timeouts(rows),
+        Err(e) => {
+            tracing::error!(%party_id, "Failed to read governance mediator timeouts: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: TIMEOUTS_READ_FAILED.to_string(),
+            });
+        }
+    };
+
     match get_governance_confirmations(
         &data.config,
         party_id,
@@ -160,15 +175,37 @@ pub async fn get_governance(
         &packages,
         batch,
         from,
+        &timeouts,
     )
     .await
     {
+        // A read that left cards out would show as a shorter list with no
+        // warning. Answer it as the failed read it is.
         Ok(GovernanceQueue {
-            actions,
+            complete: false, ..
+        }) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: FEED_READ_FAILED.to_string(),
+        }),
+        Ok(GovernanceQueue {
+            mut actions,
             mut domain_actions,
             next_cursor,
+            confirmations_capped,
             ..
         }) => {
+            // A capped read may have missed a live confirmation, so it marks
+            // nothing. Its orphans then stay out, as on `main`.
+            let timeouts = if confirmations_capped {
+                ExpireTimeouts::new()
+            } else {
+                timeouts
+            };
+            mark_stuck(
+                &mut actions,
+                &mut domain_actions,
+                &timeouts,
+                chrono::Utc::now().timestamp(),
+            );
             if !may_act {
                 withhold_payloads(&mut domain_actions);
             }
@@ -184,13 +221,23 @@ pub async fn get_governance(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to fetch governance confirmations: {e}");
+            tracing::error!("Failed to fetch governance confirmations: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch governance confirmations: {e}"),
+                error: FEED_READ_FAILED.to_string(),
             })
         }
     }
 }
+
+/// The answer to a confirmations read that failed. The cause, which can
+/// name an address, goes to the server log only.
+const FEED_READ_FAILED: &str =
+    "Failed to fetch governance confirmations: a ledger read failed. See the DecMan server log.";
+
+/// The answer to a confirmations read whose own database read failed. The
+/// cause, which can name a table, goes to the server log only.
+const TIMEOUTS_READ_FAILED: &str = "Failed to fetch governance confirmations: a read of the \
+                                    DecMan database failed. See the DecMan server log.";
 
 /// Get governance state (GovernanceRules contract state)
 /// Query parameters for the paged proposals feed.
@@ -209,6 +256,23 @@ pub struct ProposalsQuery {
 /// asking for a party's whole proposal history in one request (#424).
 const PROPOSALS_BATCH_DEFAULT: usize = 50;
 const PROPOSALS_BATCH_MAX: usize = 200;
+
+/// The stored expire timeouts as the parties each one named. A row whose
+/// list does not decode names nobody, so it marks nothing.
+fn expire_timeouts(rows: Vec<GovernanceMediatorTimeoutRow>) -> ExpireTimeouts {
+    rows.into_iter()
+        .map(|row| {
+            let unresponsive = serde_json::from_str(&row.unresponsive).unwrap_or_else(|e| {
+                tracing::warn!(
+                    contract_id = row.contract_id,
+                    "Unreadable expire timeout: {e}"
+                );
+                HashSet::new()
+            });
+            (row.contract_id, unresponsive)
+        })
+        .collect()
+}
 
 fn encode_cursor(cursor: &AcsCursor) -> Option<String> {
     serde_json::to_vec(cursor)
@@ -1643,6 +1707,37 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     (status, error)
 }
 
+/// Keeps the outcome of the latest expire attempt on `contract_id`, the
+/// evidence that marks a confirmation as one that cannot be archived.
+///
+/// A success forgets the record. A mediator timeout replaces it with the
+/// parties this timeout named, so a timeout that no longer names the
+/// confirmer clears its mark. Any other failure, an expire whose outcome is
+/// unknown included, says nothing about the confirmer, so the record stays.
+///
+/// Only expire records. `_Cancel` is controlled by the confirmer, this node's
+/// own member, so a cancel timeout never shows that the confirmer is gone.
+async fn remember_expire_outcome(
+    db: &sqlx::SqlitePool,
+    party_id: &CantonId,
+    contract_id: &str,
+    outcome: &Result<()>,
+) {
+    let persistence = match outcome {
+        Ok(()) => db.clear_mediator_timeout(party_id, contract_id).await,
+        Err(error) => match mediator_timeout(error) {
+            Some(timeout) => {
+                db.record_mediator_timeout(party_id, contract_id, &timeout.unresponsive)
+                    .await
+            }
+            None => return,
+        },
+    };
+    if let Err(e) = persistence {
+        tracing::error!(%party_id, contract_id, "Failed to persist the expire outcome: {e}");
+    }
+}
+
 /// Expire a stale governance confirmation
 #[utoipa::path(
     tag = "Governance",
@@ -1703,6 +1798,7 @@ pub async fn expire_confirmation(
             deadline,
         )
         .await;
+        remember_expire_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         Submitted::of(result, |e| {
             submission_failure("Failed to expire confirmation", e)
         })
@@ -3546,6 +3642,9 @@ mod mediator_timeout_tests {
     };
 
     use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Event, SubmitAndWaitForTransactionResponse, SubmitAndWaitResponse, Transaction, event,
+    };
     use sqlx::SqlitePool;
     use tokio::sync::Notify;
     use tonic::{
@@ -3553,10 +3652,6 @@ mod mediator_timeout_tests {
         codegen::{BoxFuture, Context as TaskContext, Poll, Service, http},
         server::NamedService,
         transport::{Server, server::TcpIncoming},
-    };
-
-    use canton_proto_rs::com::daml::ledger::api::v2::{
-        Event, SubmitAndWaitForTransactionResponse, Transaction, event,
     };
 
     use super::*;
@@ -3574,16 +3669,17 @@ mod mediator_timeout_tests {
     /// answers with `rejection` once `release` is notified. A
     /// `SubmitAndWaitForTransaction` is rejected the same way, unless
     /// `created_proposal` is set: then it answers with a transaction that
-    /// creates that contract. `deadlines` keeps the `grpc-timeout` header of
-    /// every submission. The router answers every other service as
+    /// creates that contract. Without a `rejection`, every `SubmitAndWait`
+    /// succeeds at once. `deadlines` keeps the `grpc-timeout` header of every
+    /// submission. The router answers every other service as
     /// unimplemented, so the package-ref lookup falls back to the configured
     /// package.
     #[derive(Clone)]
-    struct RejectingLedger {
-        rejection: tonic::Status,
+    pub(super) struct RejectingLedger {
+        pub(super) rejection: Option<tonic::Status>,
         created_proposal: Option<String>,
         submitted: Arc<Notify>,
-        release: Arc<Notify>,
+        pub(super) release: Arc<Notify>,
         deadlines: Arc<Mutex<Vec<Option<String>>>>,
         /// How long the answer that creates `created_proposal` takes.
         create_delay: Duration,
@@ -3593,15 +3689,24 @@ mod mediator_timeout_tests {
     }
 
     impl RejectingLedger {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
-                rejection: fixtures::mediator_timeout(OFFLINE_MEMBER),
+                rejection: Some(fixtures::mediator_timeout(OFFLINE_MEMBER)),
                 created_proposal: None,
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
                 deadlines: Arc::default(),
                 create_delay: Duration::ZERO,
                 hide_created_contract: false,
+            }
+        }
+
+        /// A ledger whose participants all answer, so every submission
+        /// succeeds.
+        fn accepting() -> Self {
+            Self {
+                rejection: None,
+                ..Self::new()
             }
         }
 
@@ -3677,9 +3782,15 @@ mod mediator_timeout_tests {
                     (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), _) => {}
                     _ => return Ok(tonic::Status::unimplemented("").into_http()),
                 }
+                let Some(rejection) = ledger.rejection else {
+                    return Ok(unary(request, |_: SubmitAndWaitRequest| {
+                        Ok(SubmitAndWaitResponse::default())
+                    })
+                    .await);
+                };
                 ledger.submitted.notify_one();
                 ledger.release.notified().await;
-                Ok(ledger.rejection.into_http())
+                Ok(rejection.into_http())
             })
         }
     }
@@ -3751,6 +3862,47 @@ mod mediator_timeout_tests {
         })
         .await
         .context("no audit row was written")?
+    }
+
+    /// The latest expire attempt wins. A failure that never reached the
+    /// mediator says nothing about the confirmer, so it keeps the record.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn expire_outcomes_keep_the_latest_timeout_until_the_confirmation_is_archived(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = CantonId::parse(&party())?;
+        let timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
+            OFFLINE_MEMBER,
+        )));
+        remember_expire_outcome(&pool, &party, "00conf", &timeout).await;
+        remember_expire_outcome(&pool, &party, "00other", &timeout).await;
+
+        let unrelated_failure = Err(anyhow::anyhow!("connection refused"));
+        remember_expire_outcome(&pool, &party, "00conf", &unrelated_failure).await;
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].contract_id, "00conf");
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec![OFFLINE_MEMBER]
+        );
+
+        let later_timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
+            "member-d::1220dddd",
+        )));
+        remember_expire_outcome(&pool, &party, "00conf", &later_timeout).await;
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec!["member-d::1220dddd"]
+        );
+
+        remember_expire_outcome(&pool, &party, "00conf", &Ok(())).await;
+
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "00other");
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -3826,13 +3978,28 @@ mod mediator_timeout_tests {
                 message.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
                 "{event:?}: {message}"
             );
+            let party = CantonId::parse(&party())?;
+            let rows = pool.get_mediator_timeouts(&party).await?;
+            // Only an expire keeps its timeout.
+            if !matches!(event, AuditEvent::Expire) {
+                assert!(rows.is_empty(), "{event:?}");
+                continue;
+            }
+            assert_eq!(rows.len(), 1, "{event:?}");
+            assert_eq!(rows[0].contract_id, "00c0ffee", "{event:?}");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+                vec![OFFLINE_MEMBER],
+                "{event:?}"
+            );
+            pool.clear_mediator_timeout(&party, "00c0ffee").await?;
         }
         Ok(())
     }
 
     /// Posts `body` to `uri` as an admin through all six governance write
     /// handlers, against `ledger`. Returns the status and the `error` field.
-    async fn post_to_writes(
+    pub(super) async fn post_to_writes(
         pool: &SqlitePool,
         ledger: &RejectingLedger,
         uri: &str,
@@ -4027,7 +4194,7 @@ mod mediator_timeout_tests {
         for (rejection, cause) in rejections {
             for (event, uri, context, body) in writes() {
                 let mut ledger = RejectingLedger::new();
-                ledger.rejection = rejection.clone();
+                ledger.rejection = Some(rejection.clone());
                 ledger.release.notify_one();
 
                 let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
@@ -4602,6 +4769,962 @@ mod mediator_timeout_tests {
         let (status, message) = submission_failure("Failed to expire confirmation", &error);
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{message}");
         assert!(message.contains("the outcome is unknown"), "{message}");
+        Ok(())
+    }
+
+    /// The record follows the latest expire attempt through the handler: a
+    /// timeout that names another party replaces it, and a success, for
+    /// example after the confirmer's participant came back, forgets it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_latest_expire_attempt_decides_the_recorded_timeout(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = CantonId::parse(&party())?;
+        let body = serde_json::json!({
+            "party_id": party,
+            "rules_contract_id": "00rules",
+            "confirmation_cid": "00c0ffee",
+        });
+        let unresponsive = |rows: &[GovernanceMediatorTimeoutRow]| -> Result<Vec<String>> {
+            let [row] = rows else {
+                anyhow::bail!("expected one record, found {}", rows.len());
+            };
+            assert_eq!(row.contract_id, "00c0ffee");
+            Ok(serde_json::from_str(&row.unresponsive)?)
+        };
+
+        let offline = RejectingLedger::new();
+        offline.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &offline, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec![OFFLINE_MEMBER]);
+
+        let mut another = RejectingLedger::new();
+        another.rejection = Some(fixtures::mediator_timeout("member-d::1220dddd"));
+        another.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &another, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec!["member-d::1220dddd"]);
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), RejectingLedger::accepting().serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/governance/expire")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+
+    /// `_Cancel` is controlled by the confirmer, this node's own member. A
+    /// cancel timeout therefore never shows that the confirmer is gone.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_timeout_is_not_recorded(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = CantonId::parse(&party())?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let (status, _) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/cancel",
+            serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+}
+
+/// `GET /governance/confirmations` read against a participant's ACS.
+#[cfg(test)]
+mod confirmations_feed_tests {
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use actix_web::{App, test as actix_test};
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        ActiveContract, GenMap, GetActiveContractsPageRequest, GetActiveContractsPageResponse,
+        GetActiveContractsResponse, GetLedgerEndRequest, GetLedgerEndResponse, Identifier, Record,
+        RecordField, Value, cumulative_filter::IdentifierFilter, gen_map,
+        get_active_contracts_response::ContractEntry, value,
+    };
+    use serde_json::json;
+    use sqlx::SqlitePool;
+    use tonic::{
+        body::Body,
+        codegen::{BoxFuture, Context as TaskContext, Poll, Service, http},
+        server::NamedService,
+        transport::{Server, server::TcpIncoming},
+    };
+
+    use super::*;
+    use crate::{
+        auth::MockAuthRegistry, db::MIGRATOR, server::ledger_rejection::fixtures,
+        signing::fake_admin_api::unary,
+    };
+
+    /// The Ledger API state service of a participant whose ACS holds
+    /// `contracts`. A page read returns, in one page, every contract whose
+    /// template matches a template filter of the request. An interface read,
+    /// such as the one for proposals, returns `proposals`, a page of the
+    /// requested size at a time, and `proposal_reads` counts those reads. A
+    /// read of the `missing` template fails the way Canton fails it when the
+    /// package is uploaded but lacks the template. A read of the `refused`
+    /// template fails with a permission error. Each proposal read after the
+    /// first `proposal_reads_served` fails the same way.
+    #[derive(Clone, Default)]
+    struct AcsLedger {
+        contracts: Arc<Vec<CreatedEvent>>,
+        missing: Option<&'static str>,
+        proposals: Arc<Vec<CreatedEvent>>,
+        proposal_reads: Arc<AtomicUsize>,
+        proposal_reads_served: Option<usize>,
+        refused: Option<&'static str>,
+    }
+
+    impl AcsLedger {
+        /// Serves the ledger on a free local port and returns the port.
+        fn serve(&self) -> Result<u16> {
+            let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+            let port = incoming.local_addr()?.port();
+            tokio::spawn(
+                Server::builder()
+                    .add_service(self.clone())
+                    .serve_with_incoming(incoming),
+            );
+            Ok(port)
+        }
+
+        fn page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> std::result::Result<GetActiveContractsPageResponse, tonic::Status> {
+            let wanted: Vec<(&str, &str)> = request
+                .event_format
+                .iter()
+                .flat_map(|format| format.filters_by_party.values())
+                .flat_map(|filters| &filters.cumulative)
+                .filter_map(|filter| match &filter.identifier_filter {
+                    Some(IdentifierFilter::TemplateFilter(t)) => t.template_id.as_ref(),
+                    _ => None,
+                })
+                .map(|id| (id.module_name.as_str(), id.entity_name.as_str()))
+                .collect();
+            if let Some(missing) = self.missing.filter(|m| wanted.iter().any(|w| w.1 == *m)) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
+                )));
+            }
+            if let Some(refused) = self.refused.filter(|r| wanted.iter().any(|w| w.1 == *r)) {
+                return Err(tonic::Status::permission_denied(format!(
+                    "PERMISSION_DENIED(7,0): cannot read {refused} at ledger.internal:5001"
+                )));
+            }
+            let reads_proposals = request
+                .event_format
+                .iter()
+                .flat_map(|format| format.filters_by_party.values())
+                .flat_map(|filters| &filters.cumulative)
+                .any(|filter| {
+                    matches!(
+                        filter.identifier_filter,
+                        Some(IdentifierFilter::InterfaceFilter(_))
+                    )
+                });
+            if reads_proposals {
+                let read = self.proposal_reads.fetch_add(1, Ordering::SeqCst) + 1;
+                if self
+                    .proposal_reads_served
+                    .is_some_and(|served| read > served)
+                {
+                    return Err(tonic::Status::permission_denied(
+                        "PERMISSION_DENIED(7,0): cannot read the proposals at ledger.internal:5001",
+                    ));
+                }
+                return Ok(self.proposal_page(request));
+            }
+            let active_contracts = self
+                .contracts
+                .iter()
+                .filter(|c| {
+                    c.template_id.as_ref().is_some_and(|t| {
+                        wanted.contains(&(t.module_name.as_str(), t.entity_name.as_str()))
+                    })
+                })
+                .map(|c| GetActiveContractsResponse {
+                    contract_entry: Some(ContractEntry::ActiveContract(ActiveContract {
+                        created_event: Some(c.clone()),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })
+                .collect();
+            Ok(GetActiveContractsPageResponse {
+                active_contracts,
+                active_at_offset: 1,
+                next_page_token: None,
+            })
+        }
+
+        /// The page of `proposals` that `request` asks for. The page token is
+        /// the index of its first proposal.
+        fn proposal_page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> GetActiveContractsPageResponse {
+            let start = request
+                .page_token
+                .as_deref()
+                .and_then(|token| std::str::from_utf8(token).ok()?.parse().ok())
+                .unwrap_or(0usize);
+            let size = request.max_page_size.unwrap_or(1).max(1) as usize;
+            let end = (start + size).min(self.proposals.len());
+            GetActiveContractsPageResponse {
+                active_contracts: self.proposals[start..end]
+                    .iter()
+                    .map(|c| GetActiveContractsResponse {
+                        contract_entry: Some(ContractEntry::ActiveContract(ActiveContract {
+                            created_event: Some(c.clone()),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    })
+                    .collect(),
+                active_at_offset: 1,
+                next_page_token: (end < self.proposals.len()).then(|| end.to_string().into_bytes()),
+            }
+        }
+    }
+
+    impl Service<http::Request<Body>> for AcsLedger {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+            let ledger = self.clone();
+            Box::pin(async move {
+                let path = request.uri().path().to_string();
+                Ok(match path.strip_prefix(&format!("/{}/", Self::NAME)) {
+                    Some("GetLedgerEnd") => {
+                        unary(request, |_: GetLedgerEndRequest| {
+                            Ok(GetLedgerEndResponse {
+                                offset: 1,
+                                ..Default::default()
+                            })
+                        })
+                        .await
+                    }
+                    Some("GetActiveContractsPage") => {
+                        unary(request, move |r: GetActiveContractsPageRequest| {
+                            ledger.page(&r)
+                        })
+                        .await
+                    }
+                    _ => tonic::Status::unimplemented("").into_http(),
+                })
+            })
+        }
+    }
+
+    impl NamedService for AcsLedger {
+        const NAME: &'static str = "com.daml.ledger.api.v2.StateService";
+    }
+
+    fn id(name: &str, byte: &str) -> CantonId {
+        CantonId::parse(&format!("{name}::1220{}", byte.repeat(32))).expect("valid party")
+    }
+
+    fn field(label: &str, sum: value::Sum) -> RecordField {
+        RecordField {
+            label: label.to_string(),
+            value: Some(Value { sum: Some(sum) }),
+        }
+    }
+
+    fn contract(
+        contract_id: &str,
+        module: &str,
+        entity: &str,
+        fields: Vec<RecordField>,
+    ) -> CreatedEvent {
+        CreatedEvent {
+            contract_id: contract_id.to_string(),
+            template_id: Some(Identifier {
+                package_id: "00pkg".to_string(),
+                module_name: module.to_string(),
+                entity_name: entity.to_string(),
+            }),
+            create_arguments: Some(Record {
+                record_id: None,
+                fields,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The `GovernanceRules` contract of `party`, with `members`.
+    fn rules(party: &CantonId, members: &[&CantonId]) -> CreatedEvent {
+        let members = GenMap {
+            entries: members
+                .iter()
+                .map(|member| gen_map::Entry {
+                    key: Some(Value {
+                        sum: Some(value::Sum::Party(member.to_string())),
+                    }),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Unit(())),
+                    }),
+                })
+                .collect(),
+        };
+        contract(
+            "00rules",
+            "Governance.Rules",
+            "GovernanceRules",
+            vec![
+                field("governanceParty", value::Sum::Party(party.to_string())),
+                field("members", value::Sum::GenMap(members)),
+                field("threshold", value::Sum::Int64(2)),
+            ],
+        )
+    }
+
+    /// A self-action confirmation by `confirmer` that expires at `expires_at`
+    /// (Unix seconds).
+    fn self_confirmation(
+        contract_id: &str,
+        action: &ActionType,
+        confirmer: &CantonId,
+        expires_at: i64,
+    ) -> Result<CreatedEvent> {
+        let action = action
+            .to_self_proto()?
+            .sum
+            .context("an action has a value")?;
+        Ok(contract(
+            contract_id,
+            "Governance.Rules",
+            "GovernanceSelfConfirmation",
+            vec![
+                field("action", action),
+                field("confirmer", value::Sum::Party(confirmer.to_string())),
+                field("expiresAt", value::Sum::Timestamp(expires_at * 1_000_000)),
+            ],
+        ))
+    }
+
+    /// A confirmation by `confirmer` of the proposal `proposal_cid`.
+    fn domain_confirmation(
+        contract_id: &str,
+        proposal_cid: &str,
+        confirmer: &CantonId,
+        expires_at: i64,
+    ) -> CreatedEvent {
+        contract(
+            contract_id,
+            "Governance.Confirmation",
+            "GovernanceConfirmation",
+            vec![
+                field(
+                    "actionProposalCid",
+                    value::Sum::ContractId(proposal_cid.to_string()),
+                ),
+                field("actionLabel", value::Sum::Text("GenericVote".to_string())),
+                field("confirmer", value::Sum::Party(confirmer.to_string())),
+                field("expiresAt", value::Sum::Timestamp(expires_at * 1_000_000)),
+            ],
+        )
+    }
+
+    /// Mock credentials, and the Ledger API at `ledger_port`.
+    async fn state(pool: SqlitePool, ledger_port: u16) -> Result<web::Data<AppState>> {
+        let mut state = AppState::for_test_on(None, pool).into_inner();
+        Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_port = ledger_port;
+        let mock = MockAuthRegistry::new(state.party_credentials.clone());
+        *state.auth.write().await = Some(WorkflowAuth::Mock(Arc::new(mock)));
+        Ok(web::Data::from(state))
+    }
+
+    /// The feed of `party` against `ledger`.
+    async fn feed(
+        pool: &SqlitePool,
+        ledger: &AcsLedger,
+        party: &CantonId,
+    ) -> Result<serde_json::Value> {
+        feed_with(pool, ledger, party, "").await
+    }
+
+    /// The feed of `party` against `ledger`, with `extra` appended to the
+    /// query string.
+    async fn feed_with(
+        pool: &SqlitePool,
+        ledger: &AcsLedger,
+        party: &CantonId,
+        extra: &str,
+    ) -> Result<serde_json::Value> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}{extra}"
+            ))
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+        anyhow::ensure!(
+            response.status() == StatusCode::OK,
+            "the feed answered {}",
+            response.status()
+        );
+        Ok(actix_test::read_body_json(response).await)
+    }
+
+    /// The entry of `list` that holds the confirmation `contract_id`.
+    fn holding<'a>(
+        list: &'a serde_json::Value,
+        contract_id: &str,
+    ) -> Result<&'a serde_json::Value> {
+        list.as_array()
+            .context("not a list")?
+            .iter()
+            .find(|action| action["confirmations"][0]["contract_id"] == contract_id)
+            .with_context(|| format!("no action holds {contract_id}"))
+    }
+
+    /// Issue #615: an action whose expired confirmations all failed their
+    /// latest expire with a mediator timeout naming the confirmer is marked as
+    /// one that cannot be archived. A former member without such evidence is
+    /// not marked: its participant may still be online. The evidence comes
+    /// from this party's own timeout records.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_feed_marks_what_cannot_be_archived(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let other_party = id("other", "ef");
+        let (member_a, member_b, former) = (
+            id("member-a", "aa"),
+            id("member-b", "bb"),
+            id("former", "cc"),
+        );
+        let now = chrono::Utc::now().timestamp();
+        let (expired, live) = (now - 3600, now + 3600);
+        let threshold = |new_threshold| ActionType::GovernanceSetThreshold { new_threshold };
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member_a, &member_b]),
+                self_confirmation("00self-former", &threshold(3), &former, expired)?,
+                self_confirmation("00self-live", &threshold(1), &member_a, live)?,
+                self_confirmation("00self-timeout", &threshold(4), &member_b, expired)?,
+                self_confirmation("00self-named-other", &threshold(5), &member_a, expired)?,
+                domain_confirmation("00dom-timeout", "00gone-a", &member_a, expired),
+                domain_confirmation("00dom-elsewhere", "00gone-b", &member_b, expired),
+            ]),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00self-timeout", &[member_b.to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00self-named-other", &[member_b.to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00dom-timeout", &[member_a.to_string()])
+            .await?;
+        // The same confirmation id timed out for another party only.
+        pool.record_mediator_timeout(&other_party, "00dom-elsewhere", &[member_b.to_string()])
+            .await?;
+
+        let body = feed(&pool, &ledger, &party).await?;
+
+        for unmarked in ["00self-former", "00self-live", "00self-named-other"] {
+            let action = holding(&body["actions"], unmarked)?;
+            assert_eq!(
+                action["confirmations"][0]["stuck"],
+                json!(null),
+                "{unmarked}"
+            );
+            assert_eq!(action["cannot_be_archived"], json!(false), "{unmarked}");
+        }
+        let timed_out = holding(&body["actions"], "00self-timeout")?;
+        assert_eq!(
+            timed_out["confirmations"][0]["stuck"],
+            json!("participant_unresponsive")
+        );
+        assert_eq!(timed_out["cannot_be_archived"], json!(true));
+        let timed_out = holding(&body["domain_actions"], "00dom-timeout")?;
+        assert_eq!(timed_out["orphaned"], json!(true));
+        assert_eq!(
+            timed_out["confirmations"][0]["stuck"],
+            json!("participant_unresponsive")
+        );
+        assert_eq!(timed_out["cannot_be_archived"], json!(true));
+        // An orphan that can still be archived stays out of the list.
+        assert!(holding(&body["domain_actions"], "00dom-elsewhere").is_err());
+        Ok(())
+    }
+
+    /// A proposal created on the ledger for `party`.
+    fn proposal(contract_id: &str, party: &CantonId, proposer: &CantonId) -> CreatedEvent {
+        contract(
+            contract_id,
+            "Governance.Proposal",
+            "GenericVote",
+            vec![
+                field("governanceParty", value::Sum::Party(party.to_string())),
+                field("proposer", value::Sum::Party(proposer.to_string())),
+            ],
+        )
+    }
+
+    /// #615 asks that an operator can hide an orphan that cannot be archived.
+    /// With more than one page of proposals, no single page proves its
+    /// proposal gone, so the first page checks every active proposal id. An
+    /// orphan that can still be archived stays out, as on one page.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_marked_orphan_is_listed_when_the_proposals_span_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+                domain_confirmation("00dom-unmarked", "00gone-b", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+
+        let first = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+        let cursor = first["next_cursor"]
+            .as_str()
+            .context("the proposals fit one page")?;
+        let marked = holding(&first["domain_actions"], "00dom-marked")?;
+        assert_eq!(marked["orphaned"], json!(true));
+        assert_eq!(marked["cannot_be_archived"], json!(true));
+        assert!(holding(&first["domain_actions"], "00dom-unmarked").is_err());
+
+        let second =
+            feed_with(&pool, &ledger, &party, &format!("&limit=2&cursor={cursor}")).await?;
+        assert!(holding(&second["domain_actions"], "00dom-marked").is_err());
+        assert!(holding(&second["domain_actions"], "00dom-unmarked").is_err());
+        Ok(())
+    }
+
+    /// The listed action holds each party's newest confirmation only. The
+    /// scan must judge an orphan on the same confirmations, or a multi-page
+    /// feed would leave out an orphan that one page lists as marked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_judges_each_partys_newest_confirmation(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let mut older = domain_confirmation("00dom-older", "00gone", &member, expired - 60);
+        older.created_at = Some(prost_types::Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let mut newer = domain_confirmation("00dom-newer", "00gone", &member, expired);
+        newer.created_at = Some(prost_types::Timestamp {
+            seconds: 200,
+            nanos: 0,
+        });
+        pool.record_mediator_timeout(&party, "00dom-newer", &[member.to_string()])
+            .await?;
+        for proposals in [1, 3] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    older.clone(),
+                    newer.clone(),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+
+            let body = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+            let action = holding(&body["domain_actions"], "00dom-newer")
+                .with_context(|| format!("{proposals} proposals: {body}"))?;
+            assert_eq!(
+                action["cannot_be_archived"],
+                json!(true),
+                "{proposals} proposals"
+            );
+        }
+        Ok(())
+    }
+
+    /// The confirmation read stops at 5,000 contracts. A read that reached
+    /// that bound may have missed a live confirmation, so it marks nothing and
+    /// leaves its orphans out. One contract fewer still marks the orphan.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_capped_confirmation_read_marks_nothing(pool: SqlitePool) -> Result {
+        const MAX_CONFIRMATIONS_SCANNED: usize = 5_000;
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        for (confirmations, marked) in [
+            (MAX_CONFIRMATIONS_SCANNED - 1, true),
+            (MAX_CONFIRMATIONS_SCANNED, false),
+        ] {
+            let mut contracts = vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ];
+            contracts.extend((1..confirmations).map(|n| {
+                domain_confirmation(
+                    &format!("00dom-{n}"),
+                    &format!("00gone-{n}"),
+                    &member,
+                    expired,
+                )
+            }));
+            let ledger = AcsLedger {
+                contracts: Arc::new(contracts),
+                ..AcsLedger::default()
+            };
+
+            let body = feed(&pool, &ledger, &party).await?;
+
+            let listed = holding(&body["domain_actions"], "00dom-marked");
+            assert_eq!(listed.is_ok(), marked, "{confirmations} confirmations");
+            if let Ok(action) = listed {
+                assert_eq!(action["cannot_be_archived"], json!(true));
+            }
+        }
+        Ok(())
+    }
+
+    /// The first page scans the active proposal ids for a marked orphan, on
+    /// every read while the orphan exists. The scan stops after ten pages of
+    /// 1,000 ids. It then leaves the orphan out and logs one warning.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_stops_after_ten_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        // The feed reads one proposal, then the scan reads 1,000 a page.
+        for (proposals, listed) in [(10_000, true), (10_001, false)] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    domain_confirmation("00dom-marked", "00gone", &member, expired),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+
+            let body = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                feed_with(&pool, &ledger, &party, "&limit=1").await?
+            };
+
+            assert_eq!(
+                holding(&body["domain_actions"], "00dom-marked").is_ok(),
+                listed,
+                "{proposals} proposals: {body}"
+            );
+            assert_eq!(
+                ledger.proposal_reads.load(Ordering::SeqCst),
+                11,
+                "{proposals} proposals"
+            );
+            let logs = buffer.captured()?;
+            assert_eq!(
+                logs.matches("Leaving 1 marked orphans out").count(),
+                usize::from(!listed),
+                "{proposals} proposals: {logs}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A scan that fails cannot tell which marked orphans to list, so it
+    /// leaves them all out. The feed answers that as the failed read it is,
+    /// not as a shorter list.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_orphan_scan_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            proposal_reads_served: Some(1),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}&limit=2"
+            ))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(ledger.proposal_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
+        Ok(())
+    }
+
+    /// The answer to a failed read of this node's database is a fixed text.
+    /// The database error names a table, so it goes to the log only.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_database_read_answers_a_fixed_text(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            ..AcsLedger::default()
+        };
+        sqlx::query("DROP TABLE governance_mediator_timeout")
+            .execute(&pool)
+            .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(TIMEOUTS_READ_FAILED));
+        Ok(())
+    }
+
+    /// A read that leaves confirmations out must not look like a short list.
+    /// The answer names the failure, and keeps the ledger's text in the log.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_confirmation_read_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            refused: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
+        };
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
+        Ok(())
+    }
+
+    /// A package can be uploaded without one of the governance templates.
+    /// The confirmations of the templates it has must still be listed.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_template_missing_from_its_package_does_not_empty_the_feed(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-timeout", "00gone", &member, expired),
+            ]),
+            missing: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-timeout", &[member.to_string()])
+            .await?;
+
+        let body = feed(&pool, &ledger, &party).await?;
+
+        let action = holding(&body["domain_actions"], "00dom-timeout")?;
+        assert_eq!(action["cannot_be_archived"], json!(true));
+        Ok(())
+    }
+
+    /// A node without the `GovernableAction` interface has no proposals. The
+    /// read is complete, so the pending-governance poller reports no error.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_node_without_the_proposal_interface_reads_a_complete_queue(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            ..AcsLedger::default()
+        };
+        let data = state(pool, ledger.serve()?).await?;
+        let mut packages = packages();
+        packages.governance_action = None;
+
+        let queue = get_governance_confirmations(
+            &data.config,
+            &party,
+            1,
+            None,
+            None,
+            &packages,
+            25,
+            None,
+            &ExpireTimeouts::new(),
+        )
+        .await?;
+
+        assert!(queue.complete);
+        Ok(())
+    }
+
+    /// The operator flow of #615 from end to end: an expire times out at the
+    /// mediator, which names the confirmer as Canton writes a party id. The
+    /// feed then marks the confirmation, and lists the orphan it belongs to.
+    /// The other tests store the record directly, so only this one shows that
+    /// the stored names match the confirmers the feed reads from the ledger.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_expire_that_times_out_naming_the_confirmer_marks_its_action(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = id("dec", "ab");
+        let confirmer = format!("member-a::1220{}", "aa".repeat(32));
+        let member = CantonId::parse(&confirmer)?;
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                self_confirmation(
+                    "00self",
+                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
+                    &member,
+                    expired,
+                )?,
+                domain_confirmation("00dom", "00gone", &member, expired),
+            ]),
+            ..AcsLedger::default()
+        };
+
+        let before = feed(&pool, &ledger, &party).await?;
+        assert_eq!(
+            holding(&before["actions"], "00self")?["cannot_be_archived"],
+            json!(false)
+        );
+        assert!(
+            holding(&before["domain_actions"], "00dom").is_err(),
+            "{before}"
+        );
+
+        for confirmation_cid in ["00self", "00dom"] {
+            let mut offline = super::mediator_timeout_tests::RejectingLedger::new();
+            offline.rejection = Some(fixtures::mediator_timeout(&confirmer));
+            offline.release.notify_one();
+            let (status, error) = super::mediator_timeout_tests::post_to_writes(
+                &pool,
+                &offline,
+                "/governance/expire",
+                json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": confirmation_cid,
+                }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        }
+
+        let after = feed(&pool, &ledger, &party).await?;
+        for (list, cid) in [("actions", "00self"), ("domain_actions", "00dom")] {
+            let action = holding(&after[list], cid)?;
+            assert_eq!(
+                action["confirmations"][0]["stuck"],
+                json!("participant_unresponsive"),
+                "{cid}"
+            );
+            assert_eq!(action["cannot_be_archived"], json!(true), "{cid}");
+        }
         Ok(())
     }
 }
