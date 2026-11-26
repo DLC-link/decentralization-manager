@@ -43,6 +43,7 @@ pub enum TenantEndpoint {
     ThresholdAuthorize,
     ThresholdExecute,
     LocalPartyAdoptExecute,
+    DecentralizedPartyApproveHosting,
 }
 
 impl TenantEndpoint {
@@ -61,14 +62,18 @@ impl TenantEndpoint {
             Self::ThresholdAuthorize => "/v0/tenant/threshold/authorize",
             Self::ThresholdExecute => "/v0/tenant/threshold/execute",
             Self::LocalPartyAdoptExecute => "/v0/tenant/local-party/adopt-key/execute",
+            Self::DecentralizedPartyApproveHosting => {
+                "/v0/tenant/decentralized-party/approve-hosting"
+            }
         }
     }
 }
 
 /// What a new row holds.
 pub struct NewTenantCall<'a> {
-    /// The index of the key in `DECPM_TENANT_API_KEYS`. `None` in insecure
-    /// mode, where no key is checked.
+    /// The index of the key in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_DAPP_API_KEYS` for a dApp key. `None` in insecure mode, where no
+    /// key is checked.
     pub key_index: Option<usize>,
     /// The key's id, which survives a reordered key list. `None` in insecure
     /// mode.

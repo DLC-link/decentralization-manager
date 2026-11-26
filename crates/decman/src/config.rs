@@ -310,6 +310,12 @@ pub struct NodeConfig {
     /// by its index without recording the key.
     #[serde(skip)]
     pub tenant_api_keys: Vec<String>,
+    /// Bearer API keys a decentralized-party dApp presents. A dApp key may
+    /// call only `POST /v0/tenant/decentralized-party/approve-hosting` and
+    /// `GET /v0/tenant/{party}/status`, because a browser holds it. Ordered as
+    /// configured, like `tenant_api_keys`. Not serialized.
+    #[serde(skip)]
+    pub dapp_api_keys: Vec<String>,
     /// Requests per minute that one tenant API key may make to the metered
     /// `/v0/tenant/*` endpoints. 0 disables the limit. Default 120. Not
     /// serialized.
@@ -354,6 +360,7 @@ impl Default for NodeConfig {
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
             tenant_api_keys: Vec::new(),
+            dapp_api_keys: Vec::new(),
             tenant_rate_limit_per_minute: 120,
             validator_operator_party: None,
             key_store_key_file: None,

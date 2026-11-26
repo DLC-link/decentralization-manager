@@ -15,6 +15,12 @@
 //! service records each `Authorize` call and returns the proposed transaction
 //! unsigned, and it returns each transaction sent to `SignTransactions` as it
 //! came. That is what a participant that holds none of the keys would do.
+//!
+//! A test can also put proposals in the store. A read that asks for proposals
+//! lists those instead of the head state. The write service records each
+//! `SignTransactions` and `AddTransactions` request, so a test can show what
+//! DecMan signed and submitted. A test can also make this participant the last
+//! authorizer, so that an added `PartyToParticipant` goes in force.
 
 use std::{
     convert::Infallible,
@@ -40,11 +46,11 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AuthorizeRequest, AuthorizeResponse, BaseResult, GetIdRequest, GetIdResponse,
-        ListAllRequest, ListAllResponse, ListDecentralizedNamespaceDefinitionRequest,
-        ListDecentralizedNamespaceDefinitionResponse, ListNamespaceDelegationRequest,
-        ListNamespaceDelegationResponse, ListPartyToKeyMappingRequest,
-        ListPartyToKeyMappingResponse, ListPartyToParticipantRequest,
+        AddTransactionsRequest, AddTransactionsResponse, AuthorizeRequest, AuthorizeResponse,
+        BaseQuery, BaseResult, GetIdRequest, GetIdResponse, ListAllRequest, ListAllResponse,
+        ListDecentralizedNamespaceDefinitionRequest, ListDecentralizedNamespaceDefinitionResponse,
+        ListNamespaceDelegationRequest, ListNamespaceDelegationResponse,
+        ListPartyToKeyMappingRequest, ListPartyToKeyMappingResponse, ListPartyToParticipantRequest,
         ListPartyToParticipantResponse, SignTransactionsRequest, SignTransactionsResponse,
         TopologyTransactions, authorize_request, list_decentralized_namespace_definition_response,
         list_namespace_delegation_response, list_party_to_key_mapping_response,
@@ -74,6 +80,7 @@ use crate::{
     workflow::{
         onboarding::steps::generate_keys::encode_keys_payload,
         storage::{WorkflowStorage, identity_kinds},
+        topology_version,
     },
 };
 
@@ -196,6 +203,10 @@ struct Vault {
     exported: Vec<Fingerprint>,
     topology: Topology,
     authorized: Vec<AuthorizeRequest>,
+    sign_requests: Vec<SignTransactionsRequest>,
+    add_requests: Vec<AddTransactionsRequest>,
+    /// This participant's signature is the last one a proposal needs.
+    last_authorizer: bool,
 }
 
 /// The synchronizer's head state: each mapping in force, with its serial.
@@ -207,6 +218,8 @@ struct Topology {
     namespaces: Vec<(i32, DecentralizedNamespaceDefinition)>,
     p2p: Vec<(i32, PartyToParticipant)>,
     party_to_key: Vec<(i32, PartyToKeyMapping)>,
+    /// Proposals pending in the store, as signed transactions.
+    proposals: Vec<SignedTopologyTransaction>,
 }
 
 /// The context of a head-state row that adds or replaces a mapping.
@@ -252,7 +265,55 @@ fn party_namespace(party: &str) -> &str {
         .map_or("", |(_, namespace)| namespace)
 }
 
+/// The mapping a signed transaction carries, if it decodes.
+fn proposed_mapping(proposal: &SignedTopologyTransaction) -> Option<topology_mapping::Mapping> {
+    topology_version::decode_transaction(&proposal.transaction)
+        .ok()?
+        .mapping?
+        .mapping
+}
+
+/// The namespace a proposal falls under, as `ListAll` filters it.
+fn proposal_namespace(proposal: &SignedTopologyTransaction) -> String {
+    match proposed_mapping(proposal) {
+        Some(topology_mapping::Mapping::PartyToParticipant(p2p)) => {
+            party_namespace(&p2p.party).to_string()
+        }
+        Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(def)) => {
+            def.decentralized_namespace
+        }
+        _ => String::new(),
+    }
+}
+
+/// Whether a read asks for proposals rather than the head state.
+fn wants_proposals(query: Option<&BaseQuery>) -> bool {
+    query.is_some_and(|query| query.proposals)
+}
+
 impl Vault {
+    fn add_transactions(&mut self, request: AddTransactionsRequest) {
+        if self.last_authorizer {
+            for added in &request.transactions {
+                let Ok(transaction) = topology_version::decode_transaction(&added.transaction)
+                else {
+                    continue;
+                };
+                if let Some(topology_mapping::Mapping::PartyToParticipant(p2p)) =
+                    transaction.mapping.and_then(|m| m.mapping)
+                {
+                    self.topology
+                        .proposals
+                        .retain(|pending| pending.transaction != added.transaction);
+                    self.topology
+                        .p2p
+                        .push((i32::try_from(transaction.serial).unwrap_or(i32::MAX), p2p));
+                }
+            }
+        }
+        self.add_requests.push(request);
+    }
+
     fn list_my_keys(&self, request: ListMyKeysRequest) -> ListMyKeysResponse {
         let filters = request.filters.unwrap_or_default();
         ListMyKeysResponse {
@@ -369,6 +430,29 @@ impl Vault {
     }
 
     fn list_p2p(&self, request: ListPartyToParticipantRequest) -> ListPartyToParticipantResponse {
+        if wants_proposals(request.base_query.as_ref()) {
+            return ListPartyToParticipantResponse {
+                results: self
+                    .topology
+                    .proposals
+                    .iter()
+                    .filter_map(proposed_mapping)
+                    .filter_map(|mapping| match mapping {
+                        topology_mapping::Mapping::PartyToParticipant(p2p)
+                            if p2p.party.starts_with(&request.filter_party) =>
+                        {
+                            Some(list_party_to_participant_response::Result {
+                                context: Some(in_force(1)),
+                                item: Some(list_party_to_participant_response::result::Item::V30(
+                                    p2p,
+                                )),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            };
+        }
         ListPartyToParticipantResponse {
             results: self
                 .topology
@@ -409,6 +493,21 @@ impl Vault {
 
     fn list_all(&self, request: ListAllRequest) -> Result<ListAllResponse, Status> {
         let filter = request.filter_namespace.as_str();
+        if wants_proposals(request.base_query.as_ref()) {
+            let items = self
+                .topology
+                .proposals
+                .iter()
+                .filter(|proposal| proposal_namespace(proposal).starts_with(filter))
+                .map(|proposal| topology_transactions::Item {
+                    transaction: versioned(proposal.encode_to_vec()),
+                    ..Default::default()
+                })
+                .collect();
+            return Ok(ListAllResponse {
+                result: Some(TopologyTransactions { items }),
+            });
+        }
         let namespaces = self
             .topology
             .namespaces
@@ -497,6 +596,9 @@ impl FakeAdminApi {
             exported: Vec::new(),
             topology: Topology::default(),
             authorized: Vec::new(),
+            sign_requests: Vec::new(),
+            add_requests: Vec::new(),
+            last_authorizer: false,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -557,6 +659,29 @@ impl FakeAdminApi {
     /// Each `Authorize` request DecMan sent, in order.
     pub fn authorized(&self) -> Vec<AuthorizeRequest> {
         lock(&self.vault).authorized.clone()
+    }
+
+    /// Put `proposal` in the store as a pending proposal.
+    pub fn propose(&self, proposal: SignedTopologyTransaction) {
+        lock(&self.vault).topology.proposals.push(proposal);
+    }
+
+    /// Make this participant the last authorizer every proposal needs. A
+    /// `PartyToParticipant` that `AddTransactions` receives then goes in force
+    /// at its serial and leaves the pending proposals, as Canton does once the
+    /// last required signature arrives.
+    pub fn sign_last(&self) {
+        lock(&self.vault).last_authorizer = true;
+    }
+
+    /// Each `SignTransactions` request DecMan sent, in order.
+    pub fn sign_requests(&self) -> Vec<SignTransactionsRequest> {
+        lock(&self.vault).sign_requests.clone()
+    }
+
+    /// Each `AddTransactions` request DecMan sent, in order.
+    pub fn add_requests(&self) -> Vec<AddTransactionsRequest> {
+        lock(&self.vault).add_requests.clone()
     }
 
     /// A node whose participant is this fake, following `rule` for party keys
@@ -702,10 +827,18 @@ async fn dispatch(vault: Shared, request: http::Request<Body>) -> http::Response
             .await
         }
         Some("SignTransactions") => {
-            unary(request, |r: SignTransactionsRequest| {
+            unary(request, move |r: SignTransactionsRequest| {
+                lock(&vault).sign_requests.push(r.clone());
                 Ok(SignTransactionsResponse {
                     transactions: r.transactions,
                 })
+            })
+            .await
+        }
+        Some("AddTransactions") => {
+            unary(request, move |r: AddTransactionsRequest| {
+                lock(&vault).add_transactions(r);
+                Ok(AddTransactionsResponse {})
             })
             .await
         }

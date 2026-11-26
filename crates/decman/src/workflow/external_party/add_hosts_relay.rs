@@ -113,12 +113,52 @@ fn exact_mapping(
     Ok(())
 }
 
-#[allow(deprecated)]
 async fn pending_proposal(
     config: &NodeConfig,
     mapping: &PartyToParticipant,
     serial: u32,
 ) -> Result<Option<SignedTopologyTransaction>> {
+    let namespace = mapping
+        .party
+        .rsplit_once("::")
+        .context("party has no namespace")?
+        .1;
+    for item in pending_items(config, namespace).await? {
+        let Ok(signed) = decode_signed(&item) else {
+            continue;
+        };
+        if exact_mapping(&signed, mapping, serial).is_ok() {
+            return Ok(Some(signed));
+        }
+    }
+    Ok(None)
+}
+
+/// Every proposal pending in the synchronizer store under `namespace`.
+///
+/// Unlike the relay's own reads, this keeps a proposal whose signatures cover
+/// several transactions at once. Owners who sign a whole onboarding bundle
+/// with one signature leave their proposal in that form.
+///
+/// # Errors
+/// Returns an error if the synchronizer id cannot be resolved or the topology
+/// read fails.
+pub(crate) async fn pending_proposals(
+    config: &NodeConfig,
+    namespace: &str,
+) -> Result<Vec<SignedTopologyTransaction>> {
+    Ok(pending_items(config, namespace)
+        .await?
+        .iter()
+        .filter_map(|item| utils::decode_versioned::<SignedTopologyTransaction>(item).ok())
+        .filter(|signed| signed.proposal)
+        .collect())
+}
+
+/// The serialized signed transactions of the proposals pending under
+/// `namespace`, leaving out any that Canton rejected.
+#[allow(deprecated)]
+async fn pending_items(config: &NodeConfig, namespace: &str) -> Result<Vec<Vec<u8>>> {
     let synchronizer = utils::get_synchronizer_id(config).await?;
     let mut query = topology::head_state_query(&synchronizer);
     query.proposals = true;
@@ -128,27 +168,17 @@ async fn pending_proposal(
         .list_all(tonic::Request::new(ListAllRequest {
             base_query: Some(query),
             exclude_mappings: vec![],
-            filter_namespace: mapping
-                .party
-                .rsplit_once("::")
-                .context("party has no namespace")?
-                .1
-                .to_string(),
+            filter_namespace: namespace.to_string(),
         }))
         .await?
         .into_inner();
-    for item in response.result.into_iter().flat_map(|result| result.items) {
-        if item.rejection_reason.is_some() {
-            continue;
-        }
-        let Ok(signed) = decode_signed(&item.transaction) else {
-            continue;
-        };
-        if exact_mapping(&signed, mapping, serial).is_ok() {
-            return Ok(Some(signed));
-        }
-    }
-    Ok(None)
+    Ok(response
+        .result
+        .into_iter()
+        .flat_map(|result| result.items)
+        .filter(|item| item.rejection_reason.is_none())
+        .map(|item| item.transaction)
+        .collect())
 }
 
 async fn offline_manual(config: &NodeConfig) -> Result<bool> {

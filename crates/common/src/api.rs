@@ -618,6 +618,21 @@ pub struct TenantExecuteResponse {
     pub party_id: String,
 }
 
+/// Asks a covalidator to approve hosting a decentralized party. The node reads
+/// the pending `PartyToParticipant` proposal from its own synchronizer store
+/// and signs that. It never signs bytes the caller sends. The answer is a
+/// [`TenantExecuteResponse`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantApproveHostingRequest {
+    /// The full party id (`{hint}::{namespace}`).
+    pub party_id: String,
+    /// Canton's hash of the `PartyToParticipant` transaction to approve,
+    /// base64-encoded.
+    pub transaction_hash: String,
+}
+
 /// What permission a joining host gets.
 ///
 /// Two shapes, and the plan calls them B1 and B2. `Confirmation` is the
@@ -1068,8 +1083,9 @@ pub struct TenantCallAuditEntry {
     pub id: i64,
     /// Unix seconds.
     pub called_at: i64,
-    /// The index of the caller's key in `DECPM_TENANT_API_KEYS`. `None` in
-    /// insecure mode, where no key is checked.
+    /// The index of the caller's key in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_DAPP_API_KEYS` for a dApp key. `key_id` tells the two apart.
+    /// `None` in insecure mode, where no key is checked.
     pub key_index: Option<u32>,
     /// The first 16 hex characters of the SHA-256 of the caller's key. It
     /// still names the key after `DECPM_TENANT_API_KEYS` is reordered. `None`

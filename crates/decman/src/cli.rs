@@ -243,7 +243,15 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
-        /// Requests per minute that one tenant API key may make to the
+        /// Comma-separated bearer API keys for a decentralized-party dApp. A
+        /// dApp key may call only `POST /v0/tenant/decentralized-party/approve-hosting`
+        /// and `GET /v0/tenant/{party}/status`. Each key has its own budget under
+        /// `DECPM_TENANT_RATE_LIMIT_PER_MINUTE`. Empty (default) accepts no dApp
+        /// key.
+        #[arg(long, env = "DECPM_DAPP_API_KEYS")]
+        dapp_api_keys: Option<String>,
+
+        /// Requests per minute that one tenant or dApp API key may make to the
         /// metered `/v0/tenant/*` endpoints. 0 disables the limit. Default 120.
         #[arg(long, env = "DECPM_TENANT_RATE_LIMIT_PER_MINUTE")]
         tenant_rate_limit_per_minute: Option<u32>,
@@ -402,6 +410,33 @@ mod tests {
         assert_eq!(
             dec_party_manager::config::NodeConfig::default().http_keep_alive_secs,
             75
+        );
+    }
+
+    /// Operators set the dApp keys by this variable name. A different name
+    /// would leave the list empty, and every dApp call would answer 401.
+    #[test]
+    fn dapp_api_keys_read_their_operator_environment_variable() {
+        let command = Cli::command();
+        let serve = command.find_subcommand("serve").unwrap();
+        let argument = serve
+            .get_arguments()
+            .find(|argument| argument.get_id() == "dapp_api_keys")
+            .unwrap();
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new("DECPM_DAPP_API_KEYS"))
+        );
+
+        let cli =
+            Cli::try_parse_from(["dec-party-manager", "serve", "--dapp-api-keys", "a,b"]).unwrap();
+        let Commands::Serve { dapp_api_keys, .. } = cli.command;
+        assert_eq!(dapp_api_keys.as_deref(), Some("a,b"));
+        assert!(
+            dec_party_manager::config::NodeConfig::default()
+                .dapp_api_keys
+                .is_empty(),
+            "no dApp key is accepted unless the operator sets one"
         );
     }
 }

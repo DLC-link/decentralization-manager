@@ -14,6 +14,7 @@
 //! half-created one — the wallet just retries the host that failed.
 
 pub mod add_hosts;
+pub mod decentralized_hosting;
 pub mod keys;
 pub mod local_party;
 pub mod steps;

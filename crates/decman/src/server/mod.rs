@@ -10,6 +10,7 @@
 mod assets;
 mod audit;
 mod chain_audit;
+mod cors;
 mod event_filters;
 mod external_parties;
 mod former_parties;
@@ -46,7 +47,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use anyhow::{Context, bail};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -1513,20 +1513,13 @@ pub async fn start_server(
     let http_keep_alive = Duration::from_secs(config.http_keep_alive_secs);
     HttpServer::new(move || {
         // Frontend is embedded and served from this same origin, so no
-        // cross-origin access is required by default. `Cors::default()` is
-        // same-origin only — tightening the previous `Cors::permissive()`.
+        // cross-origin access is required by default.
         //
         // For split-origin deployments (reverse proxy, separate dev server,
         // etc.) the operator can set `--allowed-origin` to permit one
-        // additional origin with credentials.
-        let cors = match allowed_origin.as_deref() {
-            Some(origin) => Cors::default()
-                .allowed_origin(origin)
-                .allow_any_method()
-                .allow_any_header()
-                .supports_credentials(),
-            None => Cors::default(),
-        };
+        // additional origin with credentials. The two dApp routes accept any
+        // origin without credentials; see `cors`.
+        let cors = cors::RouteCors::new(allowed_origin.as_deref());
 
         // Increase payload limit to 100MB for DAR file uploads
         let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);
@@ -1590,6 +1583,7 @@ pub async fn start_server(
             .service(handlers::tenant_party_state)
             .service(handlers::tenant_unhost)
             .service(handlers::tenant_status)
+            .service(handlers::tenant_approve_decentralized_hosting)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)

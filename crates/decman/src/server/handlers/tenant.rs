@@ -44,10 +44,10 @@ use crate::{
             LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
             TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsPublishRequest, TenantAddHostsRequest,
-            TenantAddHostsStageResponse, TenantExecuteRequest, TenantExecuteResponse,
-            TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
-            TenantThresholdExecuteRequest, TenantThresholdRequest, TenantUnhostRequest,
-            WorkflowProgress, WorkflowStatusResponse,
+            TenantAddHostsStageResponse, TenantApproveHostingRequest, TenantExecuteRequest,
+            TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
+            TenantUnhostRequest, WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -57,6 +57,7 @@ use crate::{
             read_party_to_participant, release_import_window_owner, replication_target,
             stage_add_hosts, submit_add_hosts,
         },
+        decentralized_hosting::{Approval, ApproveHostingError, approve_hosting},
         keys::fingerprint_from_public_key,
         local_party::{LocalPartyAdoptionPayload, prepare_adoption, submit_adoption},
         steps::{
@@ -97,6 +98,7 @@ use super::{unhost::run_unhost, workflows::validate_confirmation_threshold};
         (status = 200, description = "Unsigned onboarding topology", body = TenantPrepareResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -173,6 +175,7 @@ pub async fn tenant_prepare(
         (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantExecuteResponse),
         (status = 400, description = "Bad request (bad base64, or signed_by != public_key fingerprint)", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Allocation failed on this participant", body = ErrorResponse)
     )
@@ -351,6 +354,82 @@ pub async fn tenant_status(
 }
 
 // ============================================================================
+// Hosting a decentralized party (covalidator approval)
+// ============================================================================
+
+/// Approve hosting a decentralized party on THIS host, as one of its
+/// covalidators.
+///
+/// The owners' participants submit the party's onboarding topology first.
+/// This host then finds the pending `PartyToParticipant` proposal in its own
+/// synchronizer store by the hash the caller names, checks it, and signs it
+/// with its own topology key. It signs nothing the caller sends. A party this
+/// host already hosts answers `Completed`, so a retry is safe.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantApproveHostingRequest,
+    responses(
+        (status = 202, description = "Approved, or already hosted here (status reflects this host's view)", body = TenantExecuteResponse),
+        (status = 400, description = "Bad request, or a proposal that fails a check", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "No pending proposal for this party names this host yet; retry", body = ErrorResponse),
+        (status = 409, description = "The pending proposal has another hash, or the party exists with other content", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/decentralized-party/approve-hosting")]
+pub async fn tenant_approve_decentralized_hosting(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantApproveHostingRequest>,
+) -> impl Responder {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
+        &data,
+        key,
+        TenantEndpoint::DecentralizedPartyApproveHosting,
+        party_id,
+        move |data| async move { tenant_approve_hosting_on_this_host(&data, &body).await },
+    )
+    .await
+}
+
+async fn tenant_approve_hosting_on_this_host(
+    data: &AppState,
+    body: &TenantApproveHostingRequest,
+) -> HttpResponse {
+    let transaction_hash = match STANDARD.decode(&body.transaction_hash) {
+        Ok(hash) => hash,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("transaction_hash is not valid base64: {e}"),
+            });
+        }
+    };
+    match approve_hosting(&data.config, &body.party_id, &transaction_hash).await {
+        Ok(approval) => {
+            let status = match approval {
+                Approval::AlreadyHosted | Approval::Approved { hosted: true } => {
+                    WorkflowProgress::Completed
+                }
+                Approval::Approved { hosted: false } => WorkflowProgress::InProgress,
+            };
+            HttpResponse::Accepted().json(TenantExecuteResponse {
+                status,
+                party_id: body.party_id.clone(),
+            })
+        }
+        Err(error) => approve_hosting_error_response(error),
+    }
+}
+
+// ============================================================================
 // Add hosts to an existing party (wallet-driven)
 // ============================================================================
 
@@ -365,6 +444,7 @@ pub async fn tenant_status(
         (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The serial differs, or the joiner is busy, disconnected, or still relaying an ACS", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -455,6 +535,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad host set, or a change this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -544,6 +625,7 @@ async fn tenant_add_hosts_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -637,6 +719,7 @@ async fn tenant_add_hosts_execute_on_this_host(
     responses(
         (status = 200, description = "Joiner is disconnected and its signatures are ready", body = TenantAddHostsStageResponse),
         (status = 400, description = "Invalid change or this participant is not a joiner", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "Another import owns the participant or the serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -701,6 +784,7 @@ pub async fn tenant_add_hosts_stage(
     responses(
         (status = 202, description = "Joiner signatures submitted", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "The signatures do not describe the requested change", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -794,6 +878,7 @@ pub async fn tenant_add_hosts_publish(
         (status = 200, description = "One block of the ACS", body = TenantAcsBlockResponse),
         (status = 400, description = "Bad target participant id or seq", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's export; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
@@ -942,6 +1027,7 @@ pub async fn tenant_acs_snapshot(
         (status = 200, description = "Block taken; complete says whether the import finished", body = TenantAcsImportResponse),
         (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; only a block that opens a copy, or that no open copy takes, counts. Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1287,6 +1373,7 @@ async fn completed_tenant_import(
         (status = 200, description = "Unsigned threshold change", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "A threshold this party cannot meet", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1345,6 +1432,7 @@ pub async fn tenant_threshold_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "A threshold this party cannot field, or a party this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1421,6 +1509,7 @@ async fn tenant_threshold_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or a bundle that changes more than the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1507,6 +1596,7 @@ async fn tenant_threshold_execute_on_this_host(
     responses(
         (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
@@ -1566,6 +1656,7 @@ pub async fn tenant_party_state(
         (status = 202, description = "The topology write was accepted but is not effective yet; repeat the call", body = ExternalPartyUnhostResponse),
         (status = 400, description = "participant_id is not this host, this host is the last host, or the hosts left could not meet the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host the party", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved, or an unhost or ACS relay for the party is running", body = ErrorResponse),
         (status = 422, description = "This host has no validator operator party, and splice_cleanup was not false", body = ErrorResponse),
@@ -1794,6 +1885,7 @@ const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
         (status = 200, description = "Unsigned conversion", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Not local to this participant, already converted, or a bad key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1842,6 +1934,7 @@ pub async fn tenant_local_party_adopt_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, not local to this participant, or a bundle that changes more than adopting the key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -2024,6 +2117,41 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
             // leak as omnibus#46. Nothing in the chain is actionable to the
             // caller anyway: a Canton failure is ours to fix.
             tracing::error!("tenant add-hosts {stage}: Canton call failed: {error:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "A Canton call failed on this host; see the host's logs".to_string(),
+            })
+        }
+    }
+}
+
+/// Map an [`ApproveHostingError`] onto the status code that tells the caller
+/// what to do: retry later (404), stop because the proposal is stale or the
+/// party exists (409), fix the request (400), or treat this host as unhealthy
+/// (500).
+fn approve_hosting_error_response(error: ApproveHostingError) -> HttpResponse {
+    match error {
+        ApproveHostingError::NotPending { .. } => {
+            tracing::info!("decentralized-party hosting: {error}");
+            HttpResponse::NotFound().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Conflict(_) => {
+            tracing::info!("decentralized-party hosting: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Invalid(_) => {
+            tracing::warn!("decentralized-party hosting: refused the request: {error}");
+            HttpResponse::BadRequest().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Canton(_) => {
+            // The chain goes to the log, not the body: a transport error in it
+            // names the admin endpoint, and the caller cannot act on it.
+            tracing::error!("decentralized-party hosting: Canton call failed: {error:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: "A Canton call failed on this host; see the host's logs".to_string(),
             })
@@ -2441,6 +2569,7 @@ mod audit_tests {
         TenantKey {
             index: 0,
             id: crate::server::middleware::tenant_key_id("key"),
+            dapp: false,
         }
     }
 
@@ -3091,3 +3220,725 @@ mod audit_tests {
 #[cfg(test)]
 #[path = "tenant_relay_audit_tests.rs"]
 mod relay_route_audit_tests;
+
+/// The hosting approval against a fake participant. Canton is the only thing
+/// faked: the middleware, the handler, the checks and the audit run for real.
+#[cfg(test)]
+mod approve_hosting_tests {
+    use std::sync::Arc;
+
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{Signature, SigningKeysWithThreshold},
+        protocol::v30::{
+            DecentralizedNamespaceDefinition, MultiTransactionSignatures, PartyToParticipant,
+            SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+            enums::{ParticipantPermission, TopologyChangeOp},
+            party_to_participant::HostingParticipant,
+            topology_mapping,
+        },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+    };
+    use prost::Message as _;
+    use serde_json::json;
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        server::{middleware::AuthMiddleware, tenant_call_audit::TenantCallAuditRow},
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
+            key_store::topology_transaction_hash,
+        },
+        workflow::external_party::steps::party_signing_key,
+    };
+
+    const ROUTE: &str = "/v0/tenant/decentralized-party/approve-hosting";
+
+    fn namespace() -> String {
+        format!("1220{}", "dd".repeat(32))
+    }
+
+    fn party() -> String {
+        format!("dapp-party::{}", namespace())
+    }
+
+    fn other_host() -> String {
+        format!("participant-2::1220{}", "02".repeat(32))
+    }
+
+    fn confirming(host: &str) -> HostingParticipant {
+        HostingParticipant {
+            participant_uid: host.to_string(),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        }
+    }
+
+    /// A party with two owner keys at threshold 2, hosted on `hosts` at
+    /// confirmation threshold 1.
+    fn onboarding(hosts: &[&str]) -> PartyToParticipant {
+        PartyToParticipant {
+            party: party(),
+            threshold: 1,
+            participants: hosts.iter().map(|host| confirming(host)).collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![party_signing_key(&[1; 32]), party_signing_key(&[2; 32])],
+                threshold: 2,
+            }),
+        }
+    }
+
+    /// The proposal as the owners' participants leave it in the store: the
+    /// owners signed the whole onboarding bundle with one signature each.
+    fn proposal(mapping: PartyToParticipant) -> SignedTopologyTransaction {
+        let transaction = UntypedVersionedMessage {
+            version: 30,
+            wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                TopologyTransaction {
+                    operation: TopologyChangeOp::AddReplace as i32,
+                    serial: 1,
+                    mapping: Some(TopologyMapping {
+                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                    }),
+                }
+                .encode_to_vec(),
+            )),
+        }
+        .encode_to_vec();
+        SignedTopologyTransaction {
+            multi_transaction_signatures: vec![MultiTransactionSignatures {
+                transaction_hashes: vec![topology_transaction_hash(&transaction)],
+                signatures: vec![Signature {
+                    signed_by: format!("1220{}", "e1".repeat(32)),
+                    signature: vec![1; 64],
+                    ..Default::default()
+                }],
+            }],
+            transaction,
+            signatures: vec![],
+            proposal: true,
+        }
+    }
+
+    fn hash_of(proposal: &SignedTopologyTransaction) -> String {
+        STANDARD.encode(topology_transaction_hash(&proposal.transaction))
+    }
+
+    /// The party's namespace, owned by two keys outside this node.
+    fn definition() -> DecentralizedNamespaceDefinition {
+        owned_by(format!("1220{}", "e1".repeat(32)))
+    }
+
+    /// The party's namespace, owned by `owner` and one key outside this node.
+    fn owned_by(owner: String) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace(),
+            threshold: 2,
+            owners: vec![owner, format!("1220{}", "e2".repeat(32))],
+        }
+    }
+
+    /// A node on a fake participant that checks the tenant key `"key"` and the
+    /// dApp key `"dapp-key"` against a budget of `limit` calls per minute.
+    struct Host {
+        fake: FakeAdminApi,
+        _node: TestNode,
+        state: web::Data<AppState>,
+    }
+
+    impl Host {
+        async fn start(db: SqlitePool, limit: u32) -> anyhow::Result<Self> {
+            Self::with_vault(db, limit, vec![]).await
+        }
+
+        /// A host whose participant's vault holds `keys`.
+        async fn with_vault(
+            db: SqlitePool,
+            limit: u32,
+            keys: Vec<VaultKey>,
+        ) -> anyhow::Result<Self> {
+            let fake = FakeAdminApi::start(keys).await?;
+            let node = fake.node(SoftwareKeys::Refused, false).await?;
+            let Ok(mut state) = Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
+            else {
+                panic!("the freshly built state has no other owner");
+            };
+            state.test_mode = false;
+            state.config = node.config.clone();
+            state.config.tenant_api_keys = vec!["key".to_string()];
+            state.config.dapp_api_keys = vec!["dapp-key".to_string()];
+            state.config.tenant_rate_limit_per_minute = limit;
+            Ok(Self {
+                fake,
+                _node: node,
+                state: web::Data::new(state),
+            })
+        }
+
+        fn this_host(&self) -> String {
+            self.state.config.participant_id().to_string()
+        }
+
+        /// The onboarding this host co-validates, hosted here and on one other
+        /// participant.
+        fn onboarding(&self) -> PartyToParticipant {
+            onboarding(&[&self.this_host(), &other_host()])
+        }
+
+        async fn call(&self, key: &str, hash: &str) -> (StatusCode, serde_json::Value) {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(self.state.clone())
+                    .wrap(AuthMiddleware)
+                    .service(tenant_approve_decentralized_hosting),
+            )
+            .await;
+            let response =
+                actix_test::call_service(&app, request(key, &party(), hash).to_request()).await;
+            let status = response.status();
+            let body = actix_test::read_body(response).await;
+            let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            (status, body)
+        }
+    }
+
+    fn request(key: &str, party_id: &str, hash: &str) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri(ROUTE)
+            .insert_header(("Authorization", format!("Bearer {key}")))
+            .set_json(json!({ "party_id": party_id, "transaction_hash": hash }))
+    }
+
+    async fn audit_rows(db: &SqlitePool) -> anyhow::Result<Vec<common::api::TenantCallAuditEntry>> {
+        Ok(tenant_call_audit::list(db, None, 100)
+            .await?
+            .into_iter()
+            .map(TenantCallAuditRow::into_entry)
+            .collect())
+    }
+
+    /// The one audit row a call left, after checking it names the route, the
+    /// party and `status`.
+    async fn only_row(
+        db: &SqlitePool,
+        status: StatusCode,
+    ) -> anyhow::Result<common::api::TenantCallAuditEntry> {
+        let mut rows = audit_rows(db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = rows.remove(0);
+        assert_eq!(row.endpoint, ROUTE);
+        assert_eq!(row.party_id.as_deref(), Some(party().as_str()));
+        assert_eq!(row.http_status, Some(status.as_u16()));
+        assert_eq!(row.key_index, Some(0));
+        Ok(row)
+    }
+
+    /// The host finds the proposal by its hash, signs exactly the stored
+    /// transaction with its own key, and submits it. The owners' signatures
+    /// on the whole bundle travel with it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signs_and_submits_the_pending_proposal_with_the_requested_hash(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        // Still a proposal here until the other host signs.
+        assert_eq!(body, json!({ "status": "inprogress", "party_id": party() }));
+        let signed = host.fake.sign_requests();
+        assert_eq!(signed.len(), 1, "{signed:?}");
+        assert_eq!(signed[0].transactions, vec![pending.clone()]);
+        assert!(signed[0].signed_by.is_empty(), "the node picks its own key");
+        let added = host.fake.add_requests();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].transactions, vec![pending]);
+        // Both calls go to the synchronizer store that holds the proposal,
+        // and neither forces past Canton's own checks.
+        let store = Some(crate::workflow::topology::synchronizer_store_id(
+            &crate::utils::get_synchronizer_id(&host.state.config).await?,
+        ));
+        assert_eq!(signed[0].store, store);
+        assert_eq!(added[0].store, store);
+        assert!(signed[0].force_flags.is_empty(), "{signed:?}");
+        assert!(added[0].force_changes.is_empty(), "{added:?}");
+        let row = only_row(&db, StatusCode::ACCEPTED).await?;
+        assert_eq!(row.error, None);
+        Ok(())
+    }
+
+    /// A dApp approves with its key, then polls the status route with the
+    /// same key. When this host's signature is the last one the mapping needs,
+    /// the party is in force at once, and both answers say `completed`.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_last_host_to_sign_answers_completed(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.sign_last();
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body, json!({ "status": "completed", "party_id": party() }));
+        assert_eq!(host.fake.add_requests().len(), 1);
+        only_row(&db, StatusCode::ACCEPTED).await?;
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_status),
+        )
+        .await;
+        let poll = actix_test::TestRequest::get()
+            .uri(&format!("/v0/tenant/{}/status", party()))
+            .insert_header(("Authorization", "Bearer dapp-key"))
+            .to_request();
+        let response = actix_test::call_service(&app, poll).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let polled: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(polled["status"], json!("completed"), "{polled}");
+        Ok(())
+    }
+
+    /// Several proposals can wait under one namespace. The host signs only
+    /// the one whose hash the caller names, even when another proposal for
+    /// the same party, naming this host, comes first in the store.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signs_only_the_proposal_whose_hash_the_caller_names(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let mut earlier = host.onboarding();
+        if let Some(keys) = earlier.party_signing_keys.as_mut() {
+            keys.threshold = 1;
+        }
+        let decoy = proposal(earlier);
+        let named = proposal(host.onboarding());
+        assert_ne!(hash_of(&decoy), hash_of(&named));
+        host.fake.propose(decoy);
+        host.fake.propose(named.clone());
+
+        let (status, body) = host.call("key", &hash_of(&named)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let signed = host.fake.sign_requests();
+        assert_eq!(signed.len(), 1, "{signed:?}");
+        assert_eq!(signed[0].transactions, vec![named.clone()]);
+        let added = host.fake.add_requests();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].transactions, vec![named]);
+        Ok(())
+    }
+
+    /// The node refuses when it holds a key for any owner of the namespace,
+    /// not only the first one listed.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_key_anywhere_in_the_owner_list_is_refused(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let owner_key = VaultKey::software("dapp-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![owner_key.clone()]).await?;
+        host.fake.publish_namespace(
+            1,
+            DecentralizedNamespaceDefinition {
+                decentralized_namespace: namespace(),
+                threshold: 2,
+                owners: vec![
+                    format!("1220{}", "e1".repeat(32)),
+                    format!("1220{}", "e2".repeat(32)),
+                    owner_key.fingerprint().to_string(),
+                ],
+            },
+        );
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(owner_key.fingerprint().as_str())),
+            "{body}"
+        );
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        only_row(&db, StatusCode::BAD_REQUEST).await?;
+        Ok(())
+    }
+
+    /// A retry after the party went in force signs nothing again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_this_host_already_hosts_answers_completed(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.publish_p2p(1, host.onboarding());
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body, json!({ "status": "completed", "party_id": party() }));
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        only_row(&db, StatusCode::ACCEPTED).await?;
+        Ok(())
+    }
+
+    /// The owners' submission has not reached this host yet, so the caller
+    /// retries.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn no_pending_proposal_answers_404(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::NOT_FOUND).await?;
+        assert_eq!(row.error.as_deref(), body["error"].as_str());
+        Ok(())
+    }
+
+    /// The proposal that names this host is not the one the caller asked for.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_pending_proposal_with_another_hash_answers_409(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.propose(proposal(host.onboarding()));
+        let mut replaced = host.onboarding();
+        if let Some(keys) = replaced.party_signing_keys.as_mut() {
+            keys.threshold = 1;
+        }
+
+        let (status, body) = host.call("key", &hash_of(&proposal(replaced))).await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::CONFLICT).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("none has the requested hash")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    /// Onboarding creates a party. A party already in force with other content
+    /// is not signed for again, even when the proposal matches.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_in_force_with_other_content_answers_409(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let third = format!("participant-3::1220{}", "03".repeat(32));
+        host.fake
+            .publish_p2p(1, onboarding(&[&other_host(), &third]));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::CONFLICT).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("already exists")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_proposal_that_fails_a_check_answers_400_and_is_not_signed(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let mut submitting = host.onboarding();
+        submitting.participants[0].permission = ParticipantPermission::Submission as i32;
+        let pending = proposal(submitting);
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Confirmation")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    /// A covalidator is not an owner. When the vault holds a key that owns
+    /// the namespace, the node's signature would also be that owner's, so the
+    /// node refuses before it signs or submits anything.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_this_node_co_owns_is_refused_before_signing(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let owner_key = VaultKey::software("dapp-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![owner_key.clone()]).await?;
+        host.fake
+            .publish_namespace(1, owned_by(owner_key.fingerprint().to_string()));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains(owner_key.fingerprint().as_str())
+                    && e.contains("owns the namespace")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    /// The node can sign for its own participant namespace even when the
+    /// root key is not in the vault, so that namespace counts as held too.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_its_participant_co_owns_is_refused(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let participant_namespace = host.state.config.participant_id().namespace.to_hex();
+        host.fake
+            .publish_namespace(1, owned_by(participant_namespace));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        Ok(())
+    }
+
+    /// Keys of its own that own nothing here do not stop the node.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_owned_only_by_outside_keys_still_signs(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let unrelated = VaultKey::software("another-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![unrelated]).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(host.fake.sign_requests().len(), 1);
+        assert_eq!(host.fake.add_requests().len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_a_decentralized_namespace_answers_400(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("DecentralizedNamespaceDefinition")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hash_that_is_not_base64_answers_400(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+
+        let (status, body) = host.call("key", "not base64!").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("transaction_hash")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_id_that_does_not_parse_answers_400(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_approve_decentralized_hosting),
+        )
+        .await;
+
+        let response = actix_test::call_service(
+            &app,
+            request("key", "no-namespace", &STANDARD.encode([0u8; 34])).to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].party_id.as_deref(), Some("no-namespace"));
+        Ok(())
+    }
+
+    /// A participant that cannot be reached is this host's problem, and the
+    /// answer does not say where the participant is.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_canton_call_answers_500(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let Ok(mut state) = Arc::try_unwrap(host.state.into_inner()) else {
+            panic!("the test holds the only reference to its state");
+        };
+        // Nothing listens here, so the first Canton call fails at once.
+        state.config.canton.admin_api_port = 1;
+        let host = Host {
+            state: web::Data::new(state),
+            ..host
+        };
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(
+            body["error"],
+            json!("A Canton call failed on this host; see the host's logs")
+        );
+        only_row(&db, StatusCode::INTERNAL_SERVER_ERROR).await?;
+        Ok(())
+    }
+
+    /// A dApp key reaches the approval, and the row names it. The same key
+    /// gets a 403 from another tenant route, before that handler runs.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dapp_key_reaches_the_approval_and_no_other_write(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let row = only_row(&db, StatusCode::ACCEPTED).await?;
+        assert_eq!(
+            row.key_id,
+            Some(crate::server::middleware::tenant_key_id("dapp-key"))
+        );
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_execute),
+        )
+        .await;
+        let execute = actix_test::TestRequest::post()
+            .uri("/v0/tenant/execute")
+            .insert_header(("Authorization", "Bearer dapp-key"))
+            .set_json(json!({
+                "party_hint": "alice",
+                "public_key": STANDARD.encode([7u8; 32]),
+                "topology_transactions": [],
+                "signatures": [],
+                "signed_by": "1220ff",
+            }));
+        let refused = actix_test::call_service(&app, execute.to_request()).await;
+
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(audit_rows(&db).await?.len(), 1, "a 403 writes no row");
+        Ok(())
+    }
+
+    /// A 401 returns before the handler runs, so it leaves no row.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_wrong_key_answers_401(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+
+        let (status, _) = host.call("not-a-key", "AA==").await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(audit_rows(&db).await?.is_empty());
+        assert!(host.fake.sign_requests().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_key_past_its_budget_answers_429(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 1).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_approve_decentralized_hosting),
+        )
+        .await;
+
+        let first =
+            actix_test::call_service(&app, request("key", &party(), "AA==").to_request()).await;
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+        let limited =
+            actix_test::call_service(&app, request("key", &party(), "AA==").to_request()).await;
+
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            limited
+                .headers()
+                .get(actix_web::http::header::RETRY_AFTER)
+                .is_some(),
+            "a 429 must say how long to wait"
+        );
+        assert_eq!(audit_rows(&db).await?.len(), 1, "a 429 writes no row");
+        Ok(())
+    }
+}

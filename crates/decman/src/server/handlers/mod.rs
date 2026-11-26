@@ -50,10 +50,10 @@ pub(crate) use parties::{
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{
     tenant_acs_import, tenant_acs_snapshot, tenant_add_hosts_authorize, tenant_add_hosts_execute,
-    tenant_add_hosts_prepare, tenant_add_hosts_publish, tenant_add_hosts_stage, tenant_execute,
-    tenant_local_party_adopt_execute, tenant_local_party_adopt_prepare, tenant_party_state,
-    tenant_prepare, tenant_status, tenant_threshold_authorize, tenant_threshold_execute,
-    tenant_threshold_prepare, tenant_unhost,
+    tenant_add_hosts_prepare, tenant_add_hosts_publish, tenant_add_hosts_stage,
+    tenant_approve_decentralized_hosting, tenant_execute, tenant_local_party_adopt_execute,
+    tenant_local_party_adopt_prepare, tenant_party_state, tenant_prepare, tenant_status,
+    tenant_threshold_authorize, tenant_threshold_execute, tenant_threshold_prepare, tenant_unhost,
 };
 pub(crate) use tenant_call_audit::get_tenant_call_audit;
 pub(crate) use token_standard::{
