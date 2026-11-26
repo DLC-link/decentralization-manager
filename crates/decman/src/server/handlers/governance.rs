@@ -5340,6 +5340,54 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// The listed action holds each party's newest confirmation only. The
+    /// scan must judge an orphan on the same confirmations, or a multi-page
+    /// feed would leave out an orphan that one page lists as marked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_judges_each_partys_newest_confirmation(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let mut older = domain_confirmation("00dom-older", "00gone", &member, expired - 60);
+        older.created_at = Some(prost_types::Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let mut newer = domain_confirmation("00dom-newer", "00gone", &member, expired);
+        newer.created_at = Some(prost_types::Timestamp {
+            seconds: 200,
+            nanos: 0,
+        });
+        pool.record_mediator_timeout(&party, "00dom-newer", &[member.to_string()])
+            .await?;
+        for proposals in [1, 3] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    older.clone(),
+                    newer.clone(),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+
+            let body = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+            let action = holding(&body["domain_actions"], "00dom-newer")
+                .with_context(|| format!("{proposals} proposals: {body}"))?;
+            assert_eq!(
+                action["cannot_be_archived"],
+                json!(true),
+                "{proposals} proposals"
+            );
+        }
+        Ok(())
+    }
+
     /// The first page scans the active proposal ids for a marked orphan, on
     /// every read while the orphan exists. The scan stops after ten pages of
     /// 1,000 ids. It then leaves the orphan out and logs one warning.

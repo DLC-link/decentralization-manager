@@ -611,7 +611,8 @@ pub async fn get_governance_confirmations(
     // on every first-page read while one exists, and the web UI reads the
     // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
     // of FETCH_CHUNK ids, and then leaves the orphans out. A scan that fails
-    // leaves them out too, so the batch is then incomplete.
+    // leaves them out too, so the batch is then incomplete. An orphan is
+    // marked on each party's newest confirmation, as the listed action is.
     let mut gone = HashSet::new();
     let mut orphan_scan_ok = true;
     if first_page
@@ -623,9 +624,14 @@ pub async fn get_governance_confirmations(
             .1
             .iter()
             .filter(|(cid, (_, confirmations))| {
+                let newest = interpret::dedupe_newest_per_party(
+                    confirmations.iter().collect(),
+                    |c| &c.confirming_party,
+                    |c| c.created_at,
+                );
                 !proposal_infos.contains_key(*cid)
-                    && !confirmations.is_empty()
-                    && confirmations.iter().all(|c| {
+                    && !newest.is_empty()
+                    && newest.iter().all(|c| {
                         is_stuck(
                             &c.contract_id,
                             &c.confirming_party,
@@ -736,7 +742,9 @@ fn is_stuck(
 /// A confirmation is stuck only on evidence: it has expired, and the latest
 /// expire attempt on this node timed out at the mediator naming its confirmer.
 /// Being a former member is no such evidence: its participant may still be
-/// online and confirm the archive.
+/// online and confirm the archive. The actions hold each party's newest
+/// confirmation only. An older one from the same party needs the same
+/// participant, so the newest one decides.
 ///
 /// An orphan's proposal is gone, so nobody can act on it. It stays listed only
 /// when it cannot be archived, so the operator can hide it.
