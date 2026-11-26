@@ -1271,16 +1271,21 @@ pub(crate) async fn receive_chunked_response(
             );
             return Err(NoiseError::InvalidMessage);
         }
-        assembled.extend_from_slice(&chunk_msg.payload[4..]);
-    }
-
-    if assembled.len() != total_size {
-        tracing::warn!(
-            "noise: chunked-response assembly produced {} bytes but metadata declared {}",
-            assembled.len(),
-            total_size,
-        );
-        return Err(NoiseError::InvalidMessage);
+        // Each chunk holds exactly its share of the announced size. The reply
+        // limit leaves room for more, which must not reach `assembled`.
+        let data = &chunk_msg.payload[4..];
+        let expected = CHUNK_SIZE.min(total_size - chunk_index * CHUNK_SIZE);
+        if data.len() != expected {
+            tracing::warn!(
+                peer = format!("{peer_address}:{peer_port}"),
+                chunk = chunk_index,
+                expected,
+                received = data.len(),
+                "noise: chunk response carried the wrong number of bytes",
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+        assembled.extend_from_slice(data);
     }
 
     Ok(Message::new(command_type, assembled))

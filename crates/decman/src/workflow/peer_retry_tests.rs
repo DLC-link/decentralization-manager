@@ -69,6 +69,7 @@ struct Coordinator {
     reports: Mutex<Vec<DeclineInvitationPayload>>,
     dar_requests: Mutex<Vec<RequestDarPayload>>,
     command_chunks: AtomicUsize,
+    dar_chunks_served: AtomicUsize,
     /// How long each `RequestDar` answer waits after the DAR is cached.
     dar_hold: Duration,
     dar_reply: DarReply,
@@ -90,6 +91,9 @@ pub(super) enum DarReply {
     /// Served as by default, but each chunk fetch of a DAR gets the 503 of
     /// [`DarReply::Refused`].
     ChunkRefused { pad: usize },
+    /// Served as by default, but each chunk of a DAR carries `extra` more
+    /// bytes than its share of the announced size.
+    ChunkPadded { extra: usize },
 }
 
 impl Coordinator {
@@ -108,6 +112,7 @@ impl Coordinator {
             MessageType::RequestDar => self.serve_dar(&message.payload)?,
             // An unrouted chunk belongs to a DAR, a routed one to the command.
             MessageType::GetChunk if message.instance.is_empty() => {
+                self.dar_chunks_served.fetch_add(1, Ordering::Relaxed);
                 chunk(&lock(&self.dar_chunks)?, &message.payload)?
             }
             MessageType::GetChunk => {
@@ -266,7 +271,12 @@ async fn serve(node: &NodeConfig, state: Arc<Coordinator>) -> Result<(Peer, Join
                         let dar_request = message.msg_type == MessageType::RequestDar;
                         let dar_chunk = message.msg_type == MessageType::GetChunk
                             && message.instance.is_empty();
-                        let reply = served.answer(message)?;
+                        let mut reply = served.answer(message)?;
+                        if let DarReply::ChunkPadded { extra } = served.dar_reply
+                            && dar_chunk
+                        {
+                            reply.payload.extend(std::iter::repeat_n(b'x', extra));
+                        }
                         if dar_request {
                             tokio::time::sleep(served.dar_hold).await;
                         }
@@ -355,6 +365,11 @@ impl DarServer {
     /// The DARs asked for so far, in order.
     pub(super) fn requests(&self) -> Result<Vec<RequestDarPayload>> {
         Ok(lock(&self.state.dar_requests)?.clone())
+    }
+
+    /// How many chunks of a DAR the coordinator served.
+    pub(super) fn dar_chunks_served(&self) -> usize {
+        self.state.dar_chunks_served.load(Ordering::Relaxed)
     }
 }
 

@@ -491,6 +491,37 @@ async fn a_reply_body_that_stalls_ends_the_fetch() -> Result {
     Ok(())
 }
 
+/// Each chunk of a DAR holds exactly its share of the announced size. The
+/// reply limit leaves room for 64 KiB more in each chunk. A coordinator that
+/// sends more is refused at the first such chunk, before the next is read.
+#[tokio::test]
+async fn a_chunk_with_extra_bytes_ends_the_fetch() -> Result {
+    let dars = dars(&[3 * CHUNK_SIZE]);
+    let server = DarServer::replying(dars.clone(), DarReply::ChunkPadded { extra: 1 }).await?;
+    let request = RequestDarPayload {
+        workflow_instance: COORDINATOR_RUN.to_string(),
+        index: 0,
+        filename: dars[0].0.clone(),
+    };
+
+    let error = fetch_dar_from_coordinator(
+        &server.node,
+        &server.coordinator,
+        &request,
+        &server.node.noise_retry,
+        |_| Ok(()),
+    )
+    .await
+    .expect_err("a chunk with extra bytes was read");
+
+    assert!(
+        format!("{error:#}").contains("Invalid message format"),
+        "{error:#}"
+    );
+    assert_eq!(server.dar_chunks_served(), 1);
+    Ok(())
+}
+
 /// A coordinator that refuses with an error status may send any body. The
 /// peer reads at most 4 KiB of it. The run error shows the reason escaped
 /// and cut, as it shows an `Error` reply, or only the status when the body is
