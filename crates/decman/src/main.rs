@@ -194,6 +194,7 @@ async fn run() -> Result {
             reward_max_creates,
             reward_min_expiry_margin_secs,
             metrics_port,
+            http_keep_alive_secs,
             db_encryption_key,
             insecure,
             canton_hmac_secret,
@@ -348,6 +349,9 @@ async fn run() -> Result {
             }
             if let Some(v) = reward_min_expiry_margin_secs {
                 config.reward_min_expiry_margin_secs = *v;
+            }
+            if let Some(v) = http_keep_alive_secs {
+                config.http_keep_alive_secs = *v;
             }
             if let Some(v) = metrics_port {
                 config.metrics_port = *v;
