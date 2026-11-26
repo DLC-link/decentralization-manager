@@ -243,6 +243,13 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
+        /// Comma-separated bearer API keys for this node's own operator on the
+        /// `/v0/tenant/*` endpoints. Only these keys may act on a party whose
+        /// namespace is this node's own. They also work on every other tenant
+        /// call.
+        #[arg(long, env = "DECPM_OPERATOR_API_KEYS")]
+        operator_api_keys: Option<String>,
+
         /// Requests per minute that one tenant API key may make to the
         /// metered `/v0/tenant/*` endpoints. 0 disables the limit. Default 120.
         #[arg(long, env = "DECPM_TENANT_RATE_LIMIT_PER_MINUTE")]

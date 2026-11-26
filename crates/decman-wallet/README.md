@@ -489,7 +489,8 @@ Raising the threshold above 1 then adds co-validation.
 submits on its behalf. That is a local party, and its namespace is a
 participant's key, so no wallet signature can authorize its topology. Its hosts
 use `authorize` on the namespace owner, `stage` on each joiner, and `publish`
-on the owner. See
+on the owner. On the owner node, these calls need an operator key from
+`DECPM_OPERATOR_API_KEYS`. See
 [Decentralizing an existing party](../../docs/DECENTRALIZING_AN_EXISTING_PARTY.md).
 
 ## Asking a host to leave a party

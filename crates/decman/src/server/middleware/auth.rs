@@ -196,10 +196,13 @@ const TENANT_PREFIX: &str = "/v0/tenant/";
 /// A tenant API key that matched, named without the key itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantKey {
-    /// The key's position in `DECPM_TENANT_API_KEYS`.
+    /// The key's position in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_OPERATOR_API_KEYS` for an operator key.
     pub index: usize,
     /// See [`tenant_key_id`].
     pub id: String,
+    /// The key is one of `DECPM_OPERATOR_API_KEYS`.
+    pub operator: bool,
 }
 
 /// The tenant key that the middleware accepted for a `/v0/tenant/*` request.
@@ -270,7 +273,7 @@ pub fn charge_tenant_key(
     };
     match state
         .tenant_rate_limiter
-        .check(key.index, limit, Instant::now())
+        .check(&key.id, limit, Instant::now())
     {
         Verdict::Allowed => Ok(()),
         Verdict::Limited { retry_after } => {
@@ -278,6 +281,7 @@ pub fn charge_tenant_key(
             tracing::warn!(
                 key_index = key.index,
                 key_id = %key.id,
+                operator = key.operator,
                 path,
                 retry_after_secs = secs,
                 "tenant API key over its rate limit of {limit} requests per minute"
@@ -322,19 +326,23 @@ fn match_tenant_api_key(
         .and_then(|h| h.to_str().ok())
         .and_then(parse_bearer)
         .unwrap_or_default();
-    let matched = if presented.is_empty() {
-        None
-    } else {
-        state
-            .config
-            .tenant_api_keys
-            .iter()
+    if presented.is_empty() {
+        return Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"})));
+    }
+    let position = |keys: &[String]| {
+        keys.iter()
             .position(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()))
     };
+    // The operator list goes first, so a key that is in both lists keeps its
+    // operator rights.
+    let matched = position(&state.config.operator_api_keys)
+        .map(|index| (index, true))
+        .or_else(|| position(&state.config.tenant_api_keys).map(|index| (index, false)));
     match matched {
-        Some(index) => Ok(Some(TenantKey {
+        Some((index, operator)) => Ok(Some(TenantKey {
             index,
             id: tenant_key_id(presented),
+            operator,
         })),
         None => Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"}))),
     }
@@ -659,11 +667,17 @@ mod tests {
     /// A state that checks the tenant keys `keys` against a budget of `limit`
     /// calls per minute, as a production node does.
     async fn tenant_state(keys: &[&str], limit: u32) -> Data<AppState> {
+        operator_state(keys, &[], limit).await
+    }
+
+    /// [`tenant_state`] with the operator keys `operators` as well.
+    async fn operator_state(keys: &[&str], operators: &[&str], limit: u32) -> Data<AppState> {
         let Ok(mut state) = Arc::try_unwrap(build_app_state(Vec::new()).await.into_inner()) else {
             panic!("the freshly built state has no other owner");
         };
         state.test_mode = false;
         state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
+        state.config.operator_api_keys = operators.iter().map(ToString::to_string).collect();
         state.config.tenant_rate_limit_per_minute = limit;
         Data::new(state)
     }
@@ -685,6 +699,7 @@ mod tests {
         let key = tenant_caller(&req).ok().flatten();
         HttpResponse::Ok().json(json!({
             "index": key.as_ref().map(|k| k.index),
+            "operator": key.as_ref().map(|k| k.operator),
             "id": key.map(|k| k.id),
         }))
     }
@@ -738,6 +753,65 @@ mod tests {
             .await;
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    /// An operator key is admitted and marked as one. A key in both lists keeps
+    /// its operator rights.
+    #[actix_web::test]
+    async fn the_middleware_marks_an_operator_key() {
+        let app = test::init_service(
+            App::new()
+                .app_data(operator_state(&["tenant", "both"], &["operator", "both"], 0).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+
+        for (key, index, operator) in [
+            ("tenant", 0, false),
+            ("operator", 0, true),
+            ("both", 1, true),
+        ] {
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/prepare", key, "{}").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{key}");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["index"], json!(index), "{key}");
+            assert_eq!(body["operator"], json!(operator), "{key}");
+            assert_eq!(body["id"], json!(tenant_key_id(key)), "{key}");
+        }
+    }
+
+    /// A tenant key and an operator key can share an index, but each spends its
+    /// own budget.
+    #[actix_web::test]
+    async fn an_operator_key_has_its_own_budget() {
+        let app = test::init_service(
+            App::new()
+                .app_data(operator_state(&["tenant"], &["operator"], 1).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+        let call = |key| tenant_post("/v0/tenant/prepare", key, "{}").to_request();
+
+        assert_eq!(
+            test::call_service(&app, call("tenant")).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            test::call_service(&app, call("tenant")).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            test::call_service(&app, call("operator")).await.status(),
+            StatusCode::OK
+        );
     }
 
     #[test]

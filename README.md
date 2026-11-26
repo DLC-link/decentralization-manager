@@ -228,7 +228,8 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
 | `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Needed only when the admin role arrives as an Auth0 RBAC scope | _(none)_ |
 | `DECPM_JWT_ROLE_CLAIM` | JWT claim that holds an array of role names. Needed only when the IdP puts roles in a namespaced custom claim | _(none)_ |
-| `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Unset turns the tenant API off, except in insecure mode | _(none)_ |
+| `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). The tenant API is off when this and `DECPM_OPERATOR_API_KEYS` are both unset, except in insecure mode | _(none)_ |
+| `DECPM_OPERATOR_API_KEYS` | Comma-separated bearer keys for this node's own operator on the tenant API. Only these keys may act on a party in this node's own namespace. They also work on every other tenant call. Never give one to a wallet provider | _(none)_ |
 | `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | Calls per minute that one tenant API key may make. A call past the limit gets a 429. The ACS block read does not count. An ACS block import counts only when it opens a copy, or when no open copy takes it. `0` turns the limit off. Insecure mode has no limit | `120` |
 | `DECPM_VALIDATOR_OPERATOR_PARTY` | This node's Splice validator operator party. An unhost archives the Splice contracts this party holds for the external party that the node leaves. The party also needs a [party credential](#party-credentials-for-the-validator-operator). Unset means an unhost must send `"splice_cleanup": false` | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
@@ -545,7 +546,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/external-parties/{party_id}/unhost/preview` | GET | Admin: what an unhost would do now. Reports the serial to pin, the hosts that remain, the Splice contracts to archive, and any blocker. Writes nothing |
 | `/external-parties/{party_id}/unhost` | POST | Admin: this node leaves the party. It archives its validator's Splice contracts for the party, then removes itself from the hosting mapping with its own key |
 | `/external-parties/{party_id}/unhost-audit` | GET | One row per unhost attempt on this node, newest first |
-| `/tenant-call-audit` | GET | Admin: one row per tenant call that wrote topology or state on this node, newest first. An ACS import gets a row at block 1, and a row when it completes or is abandoned. A final block that no open copy takes gets a row too. Each row has the time, the key index, the key id, the endpoint, the party, the HTTP status and the error. The key id is the first 16 hex characters of the key's SHA-256. The party id and the error are capped at 256 and 1024 characters. `?party_id=` filters by party. `?limit=` sets the row count (default 100, at most 500) |
+| `/tenant-call-audit` | GET | Admin: one row per tenant call that wrote topology or state on this node, newest first. An ACS import gets a row at block 1, and a row when it completes or is abandoned. A final block that no open copy takes gets a row too. So does a call refused with 403 because the party is in the node's own namespace. Each row has the time, the key index, the key id, the endpoint, the party, the HTTP status and the error. The key id is the first 16 hex characters of the key's SHA-256. The party id and the error are capped at 256 and 1024 characters. `?party_id=` filters by party. `?limit=` sets the row count (default 100, at most 500) |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
@@ -566,8 +567,16 @@ The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by
 [`decman-wallet`](crates/decman-wallet/README.md). A caller sends the key as
 `Authorization: Bearer <key>`. The node reads its keys from
-`DECPM_TENANT_API_KEYS`. With no keys set, it refuses every tenant call
-outside insecure mode. The node checks the key before it reads the body.
+`DECPM_TENANT_API_KEYS` and `DECPM_OPERATOR_API_KEYS`. With no keys set, it
+refuses every tenant call outside insecure mode. The node checks the key
+before it reads the body.
+
+The node signs for a party in its own namespace with its own participant key.
+So a call that acts on such a party needs an operator key, from
+`DECPM_OPERATOR_API_KEYS`. A tenant key gets a 403 there. This covers the
+`authorize` calls, the `execute` calls, the add-hosts `stage` and `publish`
+calls, the key adoption, `unhost`, and both ACS relay calls.
+
 Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` calls per minute. A
 call past the limit gets a 429 with a `Retry-After` header that gives the
 seconds to wait. One ACS copy sends a call for each block, so the ACS block

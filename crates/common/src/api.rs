@@ -1068,8 +1068,9 @@ pub struct TenantCallAuditEntry {
     pub id: i64,
     /// Unix seconds.
     pub called_at: i64,
-    /// The index of the caller's key in `DECPM_TENANT_API_KEYS`. `None` in
-    /// insecure mode, where no key is checked.
+    /// The index of the caller's key in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_OPERATOR_API_KEYS` for an operator key. `key_id` tells the two
+    /// apart. `None` in insecure mode, where no key is checked.
     pub key_index: Option<u32>,
     /// The first 16 hex characters of the SHA-256 of the caller's key. It
     /// still names the key after `DECPM_TENANT_API_KEYS` is reordered. `None`
