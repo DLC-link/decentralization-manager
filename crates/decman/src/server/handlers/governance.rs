@@ -4130,6 +4130,44 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
+    /// A timeout's answer names only the Canton error id. The server log keeps
+    /// the whole rejection, with Canton's correlation id, on a line that
+    /// names the party and the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_timed_out_write_logs_the_whole_rejection(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        // As in `the_logged_failure_names_the_party_and_the_write`.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Expire))
+            .context("no expire write")?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let buffer = super::get_party_credentials_tests::LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let (status, error) = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            post_to_writes(&pool, &ledger, uri, body).await?
+        };
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(!error.contains("5e3c1a7b"), "{error}");
+        let logs = buffer.captured()?;
+        let line = logs
+            .lines()
+            .find(|line| line.contains("MEDIATOR_SAYS_TX_TIMED_OUT(2,5e3c1a7b)"))
+            .with_context(|| format!("the timeout logged no rejection: {logs}"))?;
+        assert!(line.contains(" WARN "), "{line}");
+        assert!(line.contains(&format!("party_id={}", party())), "{line}");
+        assert!(line.contains("write=expire"), "{line}");
+        Ok(())
+    }
+
     /// The Ledger API event service of a participant that never answers.
     #[derive(Clone)]
     struct SilentEvents;

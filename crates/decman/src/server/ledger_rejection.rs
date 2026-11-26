@@ -174,8 +174,11 @@ fn printable(text: &str, max: usize) -> String {
 /// mediator rejected the write. A submission that stopped waiting before the
 /// ledger answered is also a 504, but its write may still complete, so the
 /// message says so. Any other failure is a 500 that names its cause without
-/// internal detail; the whole error chain goes to the server log.
+/// internal detail. Every failure logs its whole error chain, because the
+/// answer leaves the detail out. For a timeout, that chain holds Canton's
+/// correlation id.
 pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCode, String) {
+    tracing::warn!("{context}: {e:#}");
     if let Some(timeout) = mediator_timeout(e) {
         return (
             StatusCode::GATEWAY_TIMEOUT,
@@ -192,7 +195,6 @@ pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCod
             ),
         );
     }
-    tracing::warn!("{context}: {e:#}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         format!(
