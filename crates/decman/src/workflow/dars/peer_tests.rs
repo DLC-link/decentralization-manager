@@ -525,9 +525,12 @@ async fn a_chunk_with_extra_bytes_ends_the_fetch() -> Result {
 /// A coordinator that refuses with an error status may send any body. The
 /// peer reads at most 4 KiB of it. The run error shows the reason escaped
 /// and cut, as it shows an `Error` reply, or only the status when the body is
-/// larger. This holds for the DAR request and for its chunk fetches.
+/// larger. The retry log shows it the same way. This holds for the DAR
+/// request and for its chunk fetches.
 #[tokio::test]
 async fn a_refusal_with_an_error_status_is_bounded_and_escaped() -> Result {
+    // As in `the_upload_logs_the_coordinators_filenames_escaped`.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
     for (reply, size, kept) in [
         (DarReply::Refused { pad: 2_000 }, 100, true),
         (DarReply::Refused { pad: 8_000 }, 100, false),
@@ -549,11 +552,36 @@ async fn a_refusal_with_an_error_status_is_bounded_and_escaped() -> Result {
         let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &names, &hashes)?
             .context("no pull planned")?;
 
-        let error = pull
-            .fetch_all(&server.node)
-            .await
-            .expect_err("a refusal was read as a DAR");
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
 
+        let error = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            pull.fetch_all(&server.node).await
+        }
+        .expect_err("a refusal was read as a DAR");
+
+        let logs = String::from_utf8(
+            logs.0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the log lock is poisoned"))?
+                .clone(),
+        )?;
+        assert!(
+            logs.contains("noise: transient failure"),
+            "{reply:?}: no retry line: {logs}"
+        );
+        assert!(
+            !logs.contains("\nERROR forged") && !logs.contains('\u{202e}'),
+            "{reply:?}: {logs}"
+        );
+        assert!(
+            logs.lines().all(|line| line.len() < 1_000),
+            "{reply:?}: a log line kept the whole refusal: {logs}"
+        );
         let text = format!("{error:#}");
         assert!(
             !text.contains('\n') && !text.contains('\u{202e}'),

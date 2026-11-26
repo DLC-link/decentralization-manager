@@ -991,6 +991,32 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
     }
 }
 
+/// The most bytes of an error that a retry log line shows. A peer's refusal
+/// can hold up to [`MAX_REFUSAL_BODY`] bytes of text it chose.
+const MAX_LOGGED_ERROR_LEN: usize = 512;
+
+/// `text` as a log line or a run record may show it. Only printable ASCII
+/// passes as it is. Every other character is escaped, so text a peer
+/// controls cannot break a line or reverse the text around it. The result
+/// stops at `max` bytes and then ends with an ellipsis.
+pub(crate) fn shown(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        let printable = c == ' ' || (c.is_ascii_graphic() && c != '\\');
+        let piece: String = if printable {
+            c.to_string()
+        } else {
+            c.escape_default().collect()
+        };
+        if out.len() + piece.len() > max {
+            out.push('…');
+            break;
+        }
+        out.push_str(&piece);
+    }
+    out
+}
+
 /// Run `op` up to `config.max_attempts` times, retrying only when the returned
 /// `NoiseError` is classified as transient by `is_transient`. Sleeps
 /// `config.backoff()` between attempts. Every failure is logged at `warn`,
@@ -1024,14 +1050,14 @@ where
                     tracing::warn!(
                         peer = peer_label,
                         attempt,
-                        error = %e,
+                        error = %shown(&e.to_string(), MAX_LOGGED_ERROR_LEN),
                         "noise: transient failure, retrying",
                     );
                 } else {
                     tracing::warn!(
                         peer = peer_label,
                         attempt,
-                        error = %e,
+                        error = %shown(&e.to_string(), MAX_LOGGED_ERROR_LEN),
                         "noise: transient failure on final attempt",
                     );
                 }
@@ -1044,7 +1070,7 @@ where
                 tracing::warn!(
                     peer = peer_label,
                     attempt,
-                    error = %e,
+                    error = %shown(&e.to_string(), MAX_LOGGED_ERROR_LEN),
                     "noise: non-retryable failure",
                 );
                 return Err(e);
@@ -1057,7 +1083,7 @@ where
     tracing::warn!(
         peer = peer_label,
         attempts = config.max_attempts,
-        error = %final_err,
+        error = %shown(&final_err.to_string(), MAX_LOGGED_ERROR_LEN),
         "noise: peer unreachable after retry exhaustion",
     );
     Err(final_err)

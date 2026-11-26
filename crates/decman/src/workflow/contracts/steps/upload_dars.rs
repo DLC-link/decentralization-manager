@@ -8,10 +8,8 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{
-        contracts::DarFile,
-        dars::peer::{MAX_FIELD_LEN, shown},
-    },
+    noise::shown,
+    workflow::{contracts::DarFile, dars::peer::MAX_FIELD_LEN},
 };
 
 /// Upload DAR files to the participant

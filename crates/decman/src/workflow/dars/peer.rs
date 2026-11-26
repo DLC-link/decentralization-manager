@@ -16,7 +16,7 @@ use crate::{
         CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_REPLY_SIZE, Message, MessageType,
         NOISE_CHUNK_TIMEOUT, NoiseKeypair, client::CHUNK_FETCH_MAX_ATTEMPTS,
         parse_chunked_command_metadata, parse_public_key, receive_chunked_response,
-        send_noise_message_within,
+        send_noise_message_within, shown,
     },
     server::RequestDarPayload,
     workflow::validation::hash_dar,
@@ -352,28 +352,6 @@ fn refusal_text(payload: &[u8]) -> String {
     // Each byte adds at least one byte of text, so this prefix suffices.
     let prefix = &payload[..payload.len().min(MAX_REFUSAL_LEN + 1)];
     shown(&String::from_utf8_lossy(prefix), MAX_REFUSAL_LEN)
-}
-
-/// `text` as the log and the run record may show it. Only printable ASCII
-/// passes as it is. Every other character is escaped, so text a coordinator
-/// controls cannot break a line or reverse the text around it. The result
-/// stops at `max` bytes and then ends with an ellipsis.
-pub(crate) fn shown(text: &str, max: usize) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let printable = c == ' ' || (c.is_ascii_graphic() && c != '\\');
-        let piece: String = if printable {
-            c.to_string()
-        } else {
-            c.escape_default().collect()
-        };
-        if out.len() + piece.len() > max {
-            out.push('…');
-            break;
-        }
-        out.push_str(&piece);
-    }
-    out
 }
 
 #[cfg(test)]
