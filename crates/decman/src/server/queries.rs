@@ -610,8 +610,10 @@ pub async fn get_governance_confirmations(
     // every active proposal id. Only marked orphans start that scan. It runs
     // on every first-page read while one exists, and the web UI reads the
     // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
-    // of FETCH_CHUNK ids, and then leaves the orphans out.
+    // of FETCH_CHUNK ids, and then leaves the orphans out. A scan that fails
+    // leaves them out too, so the batch is then incomplete.
     let mut gone = HashSet::new();
+    let mut orphan_scan_ok = true;
     if first_page
         && next_cursor.is_some()
         && proposals_read_ok
@@ -650,7 +652,10 @@ pub async fn get_governance_confirmations(
                      {MAX_ORPHAN_SCAN_PAGES} pages",
                     marked.len()
                 ),
-                Err(e) => tracing::warn!("Could not check the proposals of marked orphans: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("Could not check the proposals of marked orphans: {e:#}");
+                    orphan_scan_ok = false;
+                }
             }
         }
     }
@@ -691,7 +696,7 @@ pub async fn get_governance_confirmations(
         actions,
         domain_actions,
         next_cursor,
-        complete: proposal_infos_complete && domain_confirmations_complete,
+        complete: proposal_infos_complete && domain_confirmations_complete && orphan_scan_ok,
     })
 }
 

@@ -4883,13 +4883,15 @@ mod confirmations_feed_tests {
     /// requested size at a time, and `proposal_reads` counts those reads. A
     /// read of the `missing` template fails the way Canton fails it when the
     /// package is uploaded but lacks the template. A read of the `refused`
-    /// template fails with a permission error.
+    /// template fails with a permission error. Each proposal read after the
+    /// first `proposal_reads_served` fails the same way.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
         proposals: Arc<Vec<CreatedEvent>>,
         proposal_reads: Arc<AtomicUsize>,
+        proposal_reads_served: Option<usize>,
         refused: Option<&'static str>,
     }
 
@@ -4943,7 +4945,15 @@ mod confirmations_feed_tests {
                     )
                 });
             if reads_proposals {
-                self.proposal_reads.fetch_add(1, Ordering::SeqCst);
+                let read = self.proposal_reads.fetch_add(1, Ordering::SeqCst) + 1;
+                if self
+                    .proposal_reads_served
+                    .is_some_and(|served| read > served)
+                {
+                    return Err(tonic::Status::permission_denied(
+                        "PERMISSION_DENIED(7,0): cannot read the proposals at ledger.internal:5001",
+                    ));
+                }
                 return Ok(self.proposal_page(request));
             }
             let active_contracts = self
@@ -5382,6 +5392,51 @@ mod confirmations_feed_tests {
                 "{proposals} proposals: {logs}"
             );
         }
+        Ok(())
+    }
+
+    /// A scan that fails cannot tell which marked orphans to list, so it
+    /// leaves them all out. The feed answers that as the failed read it is,
+    /// not as a shorter list.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_orphan_scan_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            proposal_reads_served: Some(1),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}&limit=2"
+            ))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(ledger.proposal_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
         Ok(())
     }
 
