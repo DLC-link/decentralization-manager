@@ -412,4 +412,31 @@ mod tests {
             75
         );
     }
+
+    /// Operators set the dApp keys by this variable name. A different name
+    /// would leave the list empty, and every dApp call would answer 401.
+    #[test]
+    fn dapp_api_keys_read_their_operator_environment_variable() {
+        let command = Cli::command();
+        let serve = command.find_subcommand("serve").unwrap();
+        let argument = serve
+            .get_arguments()
+            .find(|argument| argument.get_id() == "dapp_api_keys")
+            .unwrap();
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new("DECPM_DAPP_API_KEYS"))
+        );
+
+        let cli =
+            Cli::try_parse_from(["dec-party-manager", "serve", "--dapp-api-keys", "a,b"]).unwrap();
+        let Commands::Serve { dapp_api_keys, .. } = cli.command;
+        assert_eq!(dapp_api_keys.as_deref(), Some("a,b"));
+        assert!(
+            dec_party_manager::config::NodeConfig::default()
+                .dapp_api_keys
+                .is_empty(),
+            "no dApp key is accepted unless the operator sets one"
+        );
+    }
 }
