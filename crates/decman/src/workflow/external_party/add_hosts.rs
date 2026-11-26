@@ -44,6 +44,7 @@
 #[path = "add_hosts_relay.rs"]
 mod relay;
 
+pub(crate) use relay::pending_proposals;
 pub use relay::{
     import_onboarding_ready, import_window_owner, publish_add_hosts, release_import_window_owner,
     stage_add_hosts,

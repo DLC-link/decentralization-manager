@@ -1590,6 +1590,7 @@ pub async fn start_server(
             .service(handlers::tenant_party_state)
             .service(handlers::tenant_unhost)
             .service(handlers::tenant_status)
+            .service(handlers::tenant_approve_decentralized_hosting)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)

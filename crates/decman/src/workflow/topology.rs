@@ -703,6 +703,38 @@ pub async fn fetch_signed_party_to_participant(
     synchronizer_id: &str,
     party_id: &CantonId,
 ) -> Result<SignedTopologyTransaction> {
+    signed_party_to_participant_head(config, synchronizer_id, party_id)
+        .await?
+        .map(|(signed, _)| signed)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No PartyToParticipant transaction for {party_id} in the synchronizer head state"
+            )
+        })
+}
+
+/// The `PartyToParticipant` transaction in force for `party_id`, or `None`
+/// when the synchronizer holds none.
+///
+/// # Errors
+/// Returns an error if the topology read fails.
+pub async fn party_to_participant_head(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<Option<TopologyTransaction>> {
+    Ok(
+        signed_party_to_participant_head(config, synchronizer_id, party_id)
+            .await?
+            .map(|(_, transaction)| transaction),
+    )
+}
+
+async fn signed_party_to_participant_head(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<Option<(SignedTopologyTransaction, TopologyTransaction)>> {
     let party = party_id.to_string();
     signed_head_for(
         config,
@@ -715,13 +747,7 @@ pub async fn fetch_signed_party_to_participant(
             )
         },
     )
-    .await?
-    .map(|(signed, _)| signed)
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "No PartyToParticipant transaction for {party} in the synchronizer head state"
-        )
-    })
+    .await
 }
 
 /// The first add-or-replace transaction in the synchronizer head state under
@@ -958,6 +984,39 @@ pub async fn fetch_namespace_definition_at_head_in(
     store: StoreId,
     namespace_hex: &str,
 ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+    find_namespace_definition_at_head_in(config, store, namespace_hex)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Namespace {namespace_hex} has no add-or-replace definition in the head state"
+            )
+        })
+}
+
+/// [`fetch_namespace_definition_at_head`], or `None` when the namespace has no
+/// add-or-replace definition in force.
+///
+/// # Errors
+///
+/// Errors if the topology read fails or the serial is out of range.
+pub async fn find_namespace_definition_at_head(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    namespace_hex: &str,
+) -> Result<Option<(u32, DecentralizedNamespaceDefinition)>> {
+    find_namespace_definition_at_head_in(
+        config,
+        synchronizer_store_id(synchronizer_id),
+        namespace_hex,
+    )
+    .await
+}
+
+async fn find_namespace_definition_at_head_in(
+    config: &NodeConfig,
+    store: StoreId,
+    namespace_hex: &str,
+) -> Result<Option<(u32, DecentralizedNamespaceDefinition)>> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
@@ -971,7 +1030,7 @@ pub async fn fetch_namespace_definition_at_head_in(
         .await?
         .into_inner();
 
-    let (serial, definition) = response
+    response
         .results
         .into_iter()
         .find_map(|r| {
@@ -983,12 +1042,8 @@ pub async fn fetch_namespace_definition_at_head_in(
             (definition.decentralized_namespace == namespace_hex)
                 .then_some((context.serial, definition))
         })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Namespace {namespace_hex} has no add-or-replace definition in the head state"
-            )
-        })?;
-    Ok((u32::try_from(serial)?, definition))
+        .map(|(serial, definition)| Ok((u32::try_from(serial)?, definition)))
+        .transpose()
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer

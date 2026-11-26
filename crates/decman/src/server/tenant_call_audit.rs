@@ -43,6 +43,7 @@ pub enum TenantEndpoint {
     ThresholdAuthorize,
     ThresholdExecute,
     LocalPartyAdoptExecute,
+    DecentralizedPartyApproveHosting,
 }
 
 impl TenantEndpoint {
@@ -61,6 +62,9 @@ impl TenantEndpoint {
             Self::ThresholdAuthorize => "/v0/tenant/threshold/authorize",
             Self::ThresholdExecute => "/v0/tenant/threshold/execute",
             Self::LocalPartyAdoptExecute => "/v0/tenant/local-party/adopt-key/execute",
+            Self::DecentralizedPartyApproveHosting => {
+                "/v0/tenant/decentralized-party/approve-hosting"
+            }
         }
     }
 }

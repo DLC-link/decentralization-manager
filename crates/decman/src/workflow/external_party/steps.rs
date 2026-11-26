@@ -23,7 +23,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey,
     },
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
         enums::{ParticipantPermission, TopologyChangeOp},
         party_to_participant::HostingParticipant,
         topology_mapping,
@@ -128,89 +128,15 @@ fn validate_onboarding_topology(
         let transaction = topology_version::decode_transaction(serialized).with_context(|| {
             format!("topology transaction {index} is not a TopologyTransaction")
         })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        // Onboarding creates a party; it never replaces an existing mapping. A
-        // higher serial here would be an attempt to rewrite topology that already
-        // exists — including some other party's.
-        if transaction.serial != 1 {
-            anyhow::bail!(
-                "topology transaction {index} must have serial 1 for onboarding, got {serial}",
-                serial = transaction.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint onboards external parties and authorizes nothing else"
-            );
-        };
-
-        if p2p.party != bundle.party_id {
-            anyhow::bail!(
-                "topology transaction {index} is for party {found}, not {expected} (the party \
-                 derived from the submitted public key)",
-                found = p2p.party,
-                expected = bundle.party_id
-            );
-        }
-
-        let mut uids = Vec::with_capacity(p2p.participants.len());
-        for participant in &p2p.participants {
-            // Submission permission would let the party submit through this node
-            // directly. External parties sign their own submissions and never need
-            // it, so anything but Confirmation is refused.
-            if participant.permission != ParticipantPermission::Confirmation as i32 {
-                anyhow::bail!(
-                    "topology transaction {index} gives {uid} permission {perm}; every hosting \
-                     participant must be Confirmation",
-                    uid = participant.participant_uid,
-                    perm = participant.permission
-                );
-            }
-            if participant.onboarding.is_some() {
-                anyhow::bail!(
-                    "topology transaction {index} carries onboarding details for {uid}, which \
-                     this endpoint does not submit",
-                    uid = participant.participant_uid
-                );
-            }
-            uids.push(participant.participant_uid.clone());
-        }
-
-        let mut sorted = uids.clone();
-        sorted.sort();
-        sorted.dedup();
-        if sorted.len() != uids.len() {
-            anyhow::bail!("topology transaction {index} lists a hosting participant twice");
-        }
-        if !uids.contains(&this_participant) {
-            anyhow::bail!(
-                "topology transaction {index} does not name this participant \
-                 ({this_participant}); a host only authorizes topology that hosts it"
-            );
-        }
-
-        // Same rule the request path enforces: at least one confirmation, and never
-        // all of them, so a host can still exit later.
-        let max_threshold = uids.len().saturating_sub(1) as u32;
-        if p2p.threshold < 1 || p2p.threshold > max_threshold {
-            anyhow::bail!(
-                "topology transaction {index} has confirmation threshold {t}, which must be \
-                 between 1 and {max_threshold} (one less than the {n} hosting participants)",
-                t = p2p.threshold,
-                n = uids.len()
-            );
-        }
+        let p2p = check_onboarding_mapping(
+            &OnboardingParty {
+                this_participant: &this_participant,
+                party_id: &bundle.party_id,
+                party_source: "the party derived from the submitted public key",
+            },
+            &format!("topology transaction {index}"),
+            &transaction,
+        )?;
 
         // The party must be authorized by the key whose fingerprint *is* its
         // namespace, and by nothing else. An extra key here would let its holder
@@ -272,7 +198,7 @@ fn validate_onboarding_topology(
                 threshold: 1,
             }),
         };
-        if p2p != expected {
+        if *p2p != expected {
             anyhow::bail!(
                 "topology transaction {index} carries fields beyond a plain external-party \
                  PartyToParticipant and will not be authorized"
@@ -281,6 +207,115 @@ fn validate_onboarding_topology(
     }
 
     Ok(())
+}
+
+/// The party a serial-1 onboarding must create, and the participant checking it.
+pub(super) struct OnboardingParty<'a> {
+    pub this_participant: &'a str,
+    pub party_id: &'a str,
+    /// Where `party_id` came from, for the refusal that names it.
+    pub party_source: &'a str,
+}
+
+/// The rules every serial-1 `PartyToParticipant` meets before this node signs
+/// it, whoever holds the party's keys. `label` names the transaction in a
+/// refusal.
+///
+/// The party's signing keys are not checked here: a single-key party and a
+/// decentralized party have different rules for them.
+///
+/// # Errors
+/// Returns the reason the transaction is refused.
+pub(super) fn check_onboarding_mapping<'t>(
+    party: &OnboardingParty<'_>,
+    label: &str,
+    transaction: &'t TopologyTransaction,
+) -> Result<&'t PartyToParticipant> {
+    if transaction.operation != TopologyChangeOp::AddReplace as i32 {
+        anyhow::bail!(
+            "{label} must be an ADD_REPLACE, got operation {op}",
+            op = transaction.operation
+        );
+    }
+    // Onboarding creates a party; it never replaces an existing mapping. A
+    // higher serial here would be an attempt to rewrite topology that already
+    // exists — including some other party's.
+    if transaction.serial != 1 {
+        anyhow::bail!(
+            "{label} must have serial 1 for onboarding, got {serial}",
+            serial = transaction.serial
+        );
+    }
+
+    let Some(TopologyMapping {
+        mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
+    }) = &transaction.mapping
+    else {
+        anyhow::bail!(
+            "{label} must carry a PartyToParticipant mapping; this endpoint onboards external \
+             parties and authorizes nothing else"
+        );
+    };
+
+    if p2p.party != party.party_id {
+        anyhow::bail!(
+            "{label} is for party {found}, not {expected} ({source})",
+            found = p2p.party,
+            expected = party.party_id,
+            source = party.party_source
+        );
+    }
+
+    let mut uids = Vec::with_capacity(p2p.participants.len());
+    for participant in &p2p.participants {
+        // Submission permission would let the party submit through this node
+        // directly. External parties sign their own submissions and never need
+        // it, so anything but Confirmation is refused.
+        if participant.permission != ParticipantPermission::Confirmation as i32 {
+            anyhow::bail!(
+                "{label} gives {uid} permission {perm}; every hosting participant must be \
+                 Confirmation",
+                uid = participant.participant_uid,
+                perm = participant.permission
+            );
+        }
+        if participant.onboarding.is_some() {
+            anyhow::bail!(
+                "{label} carries onboarding details for {uid}, which this endpoint does not \
+                 submit",
+                uid = participant.participant_uid
+            );
+        }
+        uids.push(participant.participant_uid.as_str());
+    }
+
+    let mut sorted = uids.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.len() != uids.len() {
+        anyhow::bail!("{label} lists a hosting participant twice");
+    }
+    if !uids.contains(&party.this_participant) {
+        anyhow::bail!(
+            "{label} does not name this participant ({this_participant}); a host only \
+             authorizes topology that hosts it",
+            this_participant = party.this_participant
+        );
+    }
+
+    // Same rule the request path enforces: at least one confirmation, and never
+    // all of them, so a host can still exit later.
+    let max_threshold = uids.len().saturating_sub(1) as u32;
+    if p2p.threshold < 1 || p2p.threshold > max_threshold {
+        anyhow::bail!(
+            "{label} has confirmation threshold {t}, which must be between 1 and \
+             {max_threshold} (one less than the {n} hosting participants)",
+            t = p2p.threshold,
+            n = uids.len()
+        );
+    }
+
+    Ok(p2p)
 }
 
 /// The party's one signing key, as it appears in `PartyToParticipant`.

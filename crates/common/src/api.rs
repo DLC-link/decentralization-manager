@@ -618,6 +618,21 @@ pub struct TenantExecuteResponse {
     pub party_id: String,
 }
 
+/// Asks a covalidator to approve hosting a decentralized party. The node reads
+/// the pending `PartyToParticipant` proposal from its own synchronizer store
+/// and signs that. It never signs bytes the caller sends. The answer is a
+/// [`TenantExecuteResponse`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantApproveHostingRequest {
+    /// The full party id (`{hint}::{namespace}`).
+    pub party_id: String,
+    /// Canton's hash of the `PartyToParticipant` transaction to approve,
+    /// base64-encoded.
+    pub transaction_hash: String,
+}
+
 /// What permission a joining host gets.
 ///
 /// Two shapes, and the plan calls them B1 and B2. `Confirmation` is the

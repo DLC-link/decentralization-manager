@@ -44,10 +44,10 @@ use crate::{
             LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
             TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsPublishRequest, TenantAddHostsRequest,
-            TenantAddHostsStageResponse, TenantExecuteRequest, TenantExecuteResponse,
-            TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
-            TenantThresholdExecuteRequest, TenantThresholdRequest, TenantUnhostRequest,
-            WorkflowProgress, WorkflowStatusResponse,
+            TenantAddHostsStageResponse, TenantApproveHostingRequest, TenantExecuteRequest,
+            TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
+            TenantUnhostRequest, WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -57,6 +57,7 @@ use crate::{
             read_party_to_participant, release_import_window_owner, replication_target,
             stage_add_hosts, submit_add_hosts,
         },
+        decentralized_hosting::{Approval, ApproveHostingError, approve_hosting},
         keys::fingerprint_from_public_key,
         local_party::{LocalPartyAdoptionPayload, prepare_adoption, submit_adoption},
         steps::{
@@ -347,6 +348,82 @@ pub async fn tenant_status(
                 error: "Failed to read the onboarding status; see the host's logs".to_string(),
             })
         }
+    }
+}
+
+// ============================================================================
+// Hosting a decentralized party (covalidator approval)
+// ============================================================================
+
+/// Approve hosting a decentralized party on THIS host, as one of its
+/// covalidators.
+///
+/// The owners' participants submit the party's onboarding topology first.
+/// This host then finds the pending `PartyToParticipant` proposal in its own
+/// synchronizer store by the hash the caller names, checks it, and signs it
+/// with its own topology key. It signs nothing the caller sends. A party this
+/// host already hosts answers `Completed`, so a retry is safe.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantApproveHostingRequest,
+    responses(
+        (status = 202, description = "Approved, or already hosted here (status reflects this host's view)", body = TenantExecuteResponse),
+        (status = 400, description = "Bad request, or a proposal that fails a check", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "No pending proposal for this party names this host yet; retry", body = ErrorResponse),
+        (status = 409, description = "The pending proposal has another hash, or the party exists with other content", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/decentralized-party/approve-hosting")]
+pub async fn tenant_approve_decentralized_hosting(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantApproveHostingRequest>,
+) -> impl Responder {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
+        &data,
+        key,
+        TenantEndpoint::DecentralizedPartyApproveHosting,
+        party_id,
+        move |data| async move { tenant_approve_hosting_on_this_host(&data, &body).await },
+    )
+    .await
+}
+
+async fn tenant_approve_hosting_on_this_host(
+    data: &AppState,
+    body: &TenantApproveHostingRequest,
+) -> HttpResponse {
+    let transaction_hash = match STANDARD.decode(&body.transaction_hash) {
+        Ok(hash) => hash,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("transaction_hash is not valid base64: {e}"),
+            });
+        }
+    };
+    match approve_hosting(&data.config, &body.party_id, &transaction_hash).await {
+        Ok(approval) => {
+            let status = match approval {
+                Approval::AlreadyHosted | Approval::Approved { hosted: true } => {
+                    WorkflowProgress::Completed
+                }
+                Approval::Approved { hosted: false } => WorkflowProgress::InProgress,
+            };
+            HttpResponse::Accepted().json(TenantExecuteResponse {
+                status,
+                party_id: body.party_id.clone(),
+            })
+        }
+        Err(error) => approve_hosting_error_response(error),
     }
 }
 
@@ -2031,6 +2108,41 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
     }
 }
 
+/// Map an [`ApproveHostingError`] onto the status code that tells the caller
+/// what to do: retry later (404), stop because the proposal is stale or the
+/// party exists (409), fix the request (400), or treat this host as unhealthy
+/// (500).
+fn approve_hosting_error_response(error: ApproveHostingError) -> HttpResponse {
+    match error {
+        ApproveHostingError::NotPending { .. } => {
+            tracing::info!("decentralized-party hosting: {error}");
+            HttpResponse::NotFound().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Conflict(_) => {
+            tracing::info!("decentralized-party hosting: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Invalid(_) => {
+            tracing::warn!("decentralized-party hosting: refused the request: {error}");
+            HttpResponse::BadRequest().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        ApproveHostingError::Canton(_) => {
+            // The chain goes to the log, not the body: a transport error in it
+            // names the admin endpoint, and the caller cannot act on it.
+            tracing::error!("decentralized-party hosting: Canton call failed: {error:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "A Canton call failed on this host; see the host's logs".to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 async fn own_test_import(state: &AppState, party: &str) {
     MIGRATOR
@@ -3091,3 +3203,486 @@ mod audit_tests {
 #[cfg(test)]
 #[path = "tenant_relay_audit_tests.rs"]
 mod relay_route_audit_tests;
+
+/// The hosting approval against a fake participant. Canton is the only thing
+/// faked: the middleware, the handler, the checks and the audit run for real.
+#[cfg(test)]
+mod approve_hosting_tests {
+    use std::sync::Arc;
+
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{Signature, SigningKeysWithThreshold},
+        protocol::v30::{
+            DecentralizedNamespaceDefinition, MultiTransactionSignatures, PartyToParticipant,
+            SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+            enums::{ParticipantPermission, TopologyChangeOp},
+            party_to_participant::HostingParticipant,
+            topology_mapping,
+        },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+    };
+    use prost::Message as _;
+    use serde_json::json;
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        server::{middleware::AuthMiddleware, tenant_call_audit::TenantCallAuditRow},
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode},
+            key_store::topology_transaction_hash,
+        },
+        workflow::external_party::steps::party_signing_key,
+    };
+
+    const ROUTE: &str = "/v0/tenant/decentralized-party/approve-hosting";
+
+    fn namespace() -> String {
+        format!("1220{}", "dd".repeat(32))
+    }
+
+    fn party() -> String {
+        format!("dapp-party::{}", namespace())
+    }
+
+    fn other_host() -> String {
+        format!("participant-2::1220{}", "02".repeat(32))
+    }
+
+    fn confirming(host: &str) -> HostingParticipant {
+        HostingParticipant {
+            participant_uid: host.to_string(),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        }
+    }
+
+    /// A party with two owner keys at threshold 2, hosted on `hosts` at
+    /// confirmation threshold 1.
+    fn onboarding(hosts: &[&str]) -> PartyToParticipant {
+        PartyToParticipant {
+            party: party(),
+            threshold: 1,
+            participants: hosts.iter().map(|host| confirming(host)).collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![party_signing_key(&[1; 32]), party_signing_key(&[2; 32])],
+                threshold: 2,
+            }),
+        }
+    }
+
+    /// The proposal as the owners' participants leave it in the store: the
+    /// owners signed the whole onboarding bundle with one signature each.
+    fn proposal(mapping: PartyToParticipant) -> SignedTopologyTransaction {
+        let transaction = UntypedVersionedMessage {
+            version: 30,
+            wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                TopologyTransaction {
+                    operation: TopologyChangeOp::AddReplace as i32,
+                    serial: 1,
+                    mapping: Some(TopologyMapping {
+                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                    }),
+                }
+                .encode_to_vec(),
+            )),
+        }
+        .encode_to_vec();
+        SignedTopologyTransaction {
+            multi_transaction_signatures: vec![MultiTransactionSignatures {
+                transaction_hashes: vec![topology_transaction_hash(&transaction)],
+                signatures: vec![Signature {
+                    signed_by: format!("1220{}", "e1".repeat(32)),
+                    signature: vec![1; 64],
+                    ..Default::default()
+                }],
+            }],
+            transaction,
+            signatures: vec![],
+            proposal: true,
+        }
+    }
+
+    fn hash_of(proposal: &SignedTopologyTransaction) -> String {
+        STANDARD.encode(topology_transaction_hash(&proposal.transaction))
+    }
+
+    fn definition() -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace(),
+            threshold: 2,
+            owners: vec![
+                format!("1220{}", "e1".repeat(32)),
+                format!("1220{}", "e2".repeat(32)),
+            ],
+        }
+    }
+
+    /// A node on a fake participant that checks the tenant key `"key"` against
+    /// a budget of `limit` calls per minute.
+    struct Host {
+        fake: FakeAdminApi,
+        _node: TestNode,
+        state: web::Data<AppState>,
+    }
+
+    impl Host {
+        async fn start(db: SqlitePool, limit: u32) -> anyhow::Result<Self> {
+            let fake = FakeAdminApi::start(vec![]).await?;
+            let node = fake.node(SoftwareKeys::Refused, false).await?;
+            let Ok(mut state) = Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
+            else {
+                panic!("the freshly built state has no other owner");
+            };
+            state.test_mode = false;
+            state.config = node.config.clone();
+            state.config.tenant_api_keys = vec!["key".to_string()];
+            state.config.tenant_rate_limit_per_minute = limit;
+            Ok(Self {
+                fake,
+                _node: node,
+                state: web::Data::new(state),
+            })
+        }
+
+        fn this_host(&self) -> String {
+            self.state.config.participant_id().to_string()
+        }
+
+        /// The onboarding this host co-validates, hosted here and on one other
+        /// participant.
+        fn onboarding(&self) -> PartyToParticipant {
+            onboarding(&[&self.this_host(), &other_host()])
+        }
+
+        async fn call(&self, key: &str, hash: &str) -> (StatusCode, serde_json::Value) {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(self.state.clone())
+                    .wrap(AuthMiddleware)
+                    .service(tenant_approve_decentralized_hosting),
+            )
+            .await;
+            let response =
+                actix_test::call_service(&app, request(key, &party(), hash).to_request()).await;
+            let status = response.status();
+            let body = actix_test::read_body(response).await;
+            let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            (status, body)
+        }
+    }
+
+    fn request(key: &str, party_id: &str, hash: &str) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri(ROUTE)
+            .insert_header(("Authorization", format!("Bearer {key}")))
+            .set_json(json!({ "party_id": party_id, "transaction_hash": hash }))
+    }
+
+    async fn audit_rows(db: &SqlitePool) -> anyhow::Result<Vec<common::api::TenantCallAuditEntry>> {
+        Ok(tenant_call_audit::list(db, None, 100)
+            .await?
+            .into_iter()
+            .map(TenantCallAuditRow::into_entry)
+            .collect())
+    }
+
+    /// The one audit row a call left, after checking it names the route, the
+    /// party and `status`.
+    async fn only_row(
+        db: &SqlitePool,
+        status: StatusCode,
+    ) -> anyhow::Result<common::api::TenantCallAuditEntry> {
+        let mut rows = audit_rows(db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = rows.remove(0);
+        assert_eq!(row.endpoint, ROUTE);
+        assert_eq!(row.party_id.as_deref(), Some(party().as_str()));
+        assert_eq!(row.http_status, Some(status.as_u16()));
+        assert_eq!(row.key_index, Some(0));
+        Ok(row)
+    }
+
+    /// The host finds the proposal by its hash, signs exactly the stored
+    /// transaction with its own key, and submits it. The owners' signatures
+    /// on the whole bundle travel with it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signs_and_submits_the_pending_proposal_with_the_requested_hash(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        // Still a proposal here until the other host signs.
+        assert_eq!(body, json!({ "status": "inprogress", "party_id": party() }));
+        let signed = host.fake.sign_requests();
+        assert_eq!(signed.len(), 1, "{signed:?}");
+        assert_eq!(signed[0].transactions, vec![pending.clone()]);
+        assert!(signed[0].signed_by.is_empty(), "the node picks its own key");
+        let added = host.fake.add_requests();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].transactions, vec![pending]);
+        let row = only_row(&db, StatusCode::ACCEPTED).await?;
+        assert_eq!(row.error, None);
+        Ok(())
+    }
+
+    /// A retry after the party went in force signs nothing again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_this_host_already_hosts_answers_completed(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.publish_p2p(1, host.onboarding());
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body, json!({ "status": "completed", "party_id": party() }));
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        only_row(&db, StatusCode::ACCEPTED).await?;
+        Ok(())
+    }
+
+    /// The owners' submission has not reached this host yet, so the caller
+    /// retries.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn no_pending_proposal_answers_404(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::NOT_FOUND).await?;
+        assert_eq!(row.error.as_deref(), body["error"].as_str());
+        Ok(())
+    }
+
+    /// The proposal that names this host is not the one the caller asked for.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_pending_proposal_with_another_hash_answers_409(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.propose(proposal(host.onboarding()));
+        let mut replaced = host.onboarding();
+        if let Some(keys) = replaced.party_signing_keys.as_mut() {
+            keys.threshold = 1;
+        }
+
+        let (status, body) = host.call("key", &hash_of(&proposal(replaced))).await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::CONFLICT).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("none has the requested hash")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    /// Onboarding creates a party. A party already in force with other content
+    /// is not signed for again, even when the proposal matches.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_in_force_with_other_content_answers_409(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let third = format!("participant-3::1220{}", "03".repeat(32));
+        host.fake
+            .publish_p2p(1, onboarding(&[&other_host(), &third]));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::CONFLICT).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("already exists")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_proposal_that_fails_a_check_answers_400_and_is_not_signed(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let mut submitting = host.onboarding();
+        submitting.participants[0].permission = ParticipantPermission::Submission as i32;
+        let pending = proposal(submitting);
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Confirmation")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_a_decentralized_namespace_answers_400(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("DecentralizedNamespaceDefinition")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hash_that_is_not_base64_answers_400(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+
+        let (status, body) = host.call("key", "not base64!").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("transaction_hash")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_id_that_does_not_parse_answers_400(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_approve_decentralized_hosting),
+        )
+        .await;
+
+        let response = actix_test::call_service(
+            &app,
+            request("key", "no-namespace", &STANDARD.encode([0u8; 34])).to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].party_id.as_deref(), Some("no-namespace"));
+        Ok(())
+    }
+
+    /// A participant that cannot be reached is this host's problem, and the
+    /// answer does not say where the participant is.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_canton_call_answers_500(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let Ok(mut state) = Arc::try_unwrap(host.state.into_inner()) else {
+            panic!("the test holds the only reference to its state");
+        };
+        // Nothing listens here, so the first Canton call fails at once.
+        state.config.canton.admin_api_port = 1;
+        let host = Host {
+            state: web::Data::new(state),
+            ..host
+        };
+
+        let (status, body) = host
+            .call("key", &hash_of(&proposal(host.onboarding())))
+            .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(
+            body["error"],
+            json!("A Canton call failed on this host; see the host's logs")
+        );
+        only_row(&db, StatusCode::INTERNAL_SERVER_ERROR).await?;
+        Ok(())
+    }
+
+    /// A 401 returns before the handler runs, so it leaves no row.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_wrong_key_answers_401(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+
+        let (status, _) = host.call("not-a-key", "AA==").await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(audit_rows(&db).await?.is_empty());
+        assert!(host.fake.sign_requests().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_key_past_its_budget_answers_429(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 1).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_approve_decentralized_hosting),
+        )
+        .await;
+
+        let first =
+            actix_test::call_service(&app, request("key", &party(), "AA==").to_request()).await;
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+        let limited =
+            actix_test::call_service(&app, request("key", &party(), "AA==").to_request()).await;
+
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            limited
+                .headers()
+                .get(actix_web::http::header::RETRY_AFTER)
+                .is_some(),
+            "a 429 must say how long to wait"
+        );
+        assert_eq!(audit_rows(&db).await?.len(), 1, "a 429 writes no row");
+        Ok(())
+    }
+}
