@@ -3,7 +3,7 @@ import { useId, useState } from 'react'
 import { LOCALNET_PARTICIPANTS, LOCALNET_TOKEN } from '../localnet'
 import { setActingWallet } from '../mock/actions'
 import { useAppState, type ParticipantLink } from '../mock/store'
-import { addCovalidator, createWallet } from '../onboarding'
+import { addCovalidator, createWallet, replaceToken } from '../onboarding'
 import { Badge, EmptyState, ErrorText, Hex, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
 
 export function Wallets() {
@@ -40,11 +40,14 @@ export function Wallets() {
                     <Hex value={wallet.namespace} />
                   </td>
                   <td>
-                    {wallet.id === state.actingWalletId ? (
-                      <Badge tone="accent">Acting</Badge>
-                    ) : (
-                      <button onClick={() => setActingWallet(wallet.id)}>Act as</button>
-                    )}
+                    <div className="row">
+                      {wallet.id === state.actingWalletId ? (
+                        <Badge tone="accent">Acting</Badge>
+                      ) : (
+                        <button onClick={() => setActingWallet(wallet.id)}>Act as</button>
+                      )}
+                      {!wallet.participant.simulated && <ReplaceToken recordId={wallet.id} />}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -71,6 +74,7 @@ export function Wallets() {
               <tr>
                 <th>Name</th>
                 <th>Participant</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -82,6 +86,7 @@ export function Wallets() {
                   <td>
                     <ParticipantCell link={covalidator.participant} />
                   </td>
+                  <td>{!covalidator.participant.simulated && <ReplaceToken recordId={covalidator.id} />}</td>
                 </tr>
               ))}
             </tbody>
@@ -95,6 +100,43 @@ export function Wallets() {
         onAdd={addCovalidator}
       />
     </>
+  )
+}
+
+/** Swaps in a fresh token. Proposals read the record's token at each call. */
+function ReplaceToken({ recordId }: { recordId: string }) {
+  const [open, setOpen] = useState(false)
+  const [token, setToken] = useState('')
+  const [error, run] = useAction()
+
+  if (!open) return <button onClick={() => setOpen(true)}>Replace token</button>
+
+  const close = () => {
+    setToken('')
+    setOpen(false)
+  }
+  const save = () =>
+    run(async () => {
+      await replaceToken(recordId, token)
+      close()
+    })
+
+  return (
+    <div className="token-editor">
+      <input
+        type="password"
+        value={token}
+        onChange={(e) => setToken(e.target.value)}
+        autoComplete="off"
+        placeholder="New token"
+        aria-label="New token"
+      />
+      <button onClick={save}>Save</button>
+      <button className="ghost" onClick={close}>
+        Cancel
+      </button>
+      <ErrorText error={error} />
+    </div>
   )
 }
 
@@ -154,7 +196,10 @@ function ParticipantForm({
         </label>
         <button onClick={add}>{button}</button>
       </div>
-      <p className="hint">The dApp reads the participant id from the participant when you add it.</p>
+      <p className="hint">
+        The dApp reads the participant id from the participant when you add it. If a token expires, use Replace token in
+        the list above.
+      </p>
       <ErrorText error={error} />
     </Section>
   )

@@ -97,6 +97,9 @@ AllocateExternalParty without a user id. Use only localnet tokens in this mock:
 the browser stores them. Real owners will reach their participant through
 their wallet instead.
 
+A token that expires does not end a proposal. Use **Replace token** on the
+wallet or covalidator. Every later call reads the record's current token.
+
 ## Try it without a localnet
 
 Turn on **Simulated participants** to use the dApp without a localnet. The

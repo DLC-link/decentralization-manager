@@ -117,6 +117,28 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
   update((s) => ({ ...s, covalidators: [...s.covalidators, covalidator] }))
 }
 
+/**
+ * Replaces the token of a wallet or a covalidator, for participants whose
+ * tokens expire. The participant must accept the new token and report the
+ * same participant id, so the hosts that proposals bound to the record stay
+ * valid.
+ */
+export async function replaceToken(recordId: string, token: string): Promise<void> {
+  const { wallets, covalidators } = getState()
+  const record = wallets.find((w) => w.id === recordId) ?? covalidators.find((c) => c.id === recordId)
+  if (!record) throw new Error('This wallet or covalidator no longer exists.')
+  const participant: ParticipantLink = { ...record.participant, token: checkedToken(token) }
+  const participantId = await ledger.participantId(participant)
+  if (participantId !== record.participant.participantId) {
+    throw new Error(`The new token reaches participant ${participantId}, not ${record.participant.participantId}.`)
+  }
+  update((s) => ({
+    ...s,
+    wallets: s.wallets.map((w) => (w.id === recordId ? { ...w, participant } : w)),
+    covalidators: s.covalidators.map((c) => (c.id === recordId ? { ...c, participant } : c)),
+  }))
+}
+
 const modeName = (simulated: boolean) => (simulated ? 'simulated' : 'real')
 
 /**

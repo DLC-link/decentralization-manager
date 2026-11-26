@@ -274,6 +274,23 @@ button.link {
   margin-top: 12px;
 }
 
+.token-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.token-editor input {
+  width: 180px;
+}
+
+.token-editor .error {
+  flex-basis: 100%;
+  max-width: 320px;
+  margin: 0;
+}
+
 /* Text */
 .hint,
 .muted {
@@ -626,6 +643,7 @@ button.ghost:hover:not(:disabled) {
   align-items: center;
   gap: 8px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .avatars {
