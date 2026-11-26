@@ -54,9 +54,36 @@ const newId = () => crypto.randomUUID()
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+// Text copied from a terminal or a document can bring a space or a symbol
+// along. The participant then answers 404 or 401, which hides the cause.
+const NOT_PRINTABLE_ASCII = /[^\x21-\x7e]/gu
+
+/** The characters of `value` that a URL or a token cannot have, named for a person. */
+function badCharacters(value: string): string | null {
+  const found = [...new Set(value.match(NOT_PRINTABLE_ASCII) ?? [])]
+  if (found.length === 0) return null
+  const names = found.map((c) => (c === ' ' ? 'a space' : /\s/u.test(c) ? 'a tab or a line break' : `"${c}"`))
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+function checkedUrl(apiUrl: string): string {
+  const url = apiUrl.trim()
+  if (!url) throw new Error('Enter the JSON Ledger API URL.')
+  const bad = badCharacters(url)
+  if (bad) throw new Error(`The URL contains ${bad}, which a URL cannot have. Correct the URL and try again.`)
+  if (!/^(https?:\/\/|\/)/u.test(url)) throw new Error('The URL must start with http://, https:// or /.')
+  return url
+}
+
+function checkedToken(token: string): string {
+  const value = token.trim()
+  const bad = badCharacters(value)
+  if (bad) throw new Error(`The token contains ${bad}, which a token cannot have. Paste it again.`)
+  return value
+}
+
 async function linkParticipant(apiUrl: string, token: string): Promise<ParticipantLink> {
-  const connection = { apiUrl: apiUrl.trim(), token: token.trim(), simulated: isSimulated() }
-  if (!connection.apiUrl) throw new Error('Enter the JSON Ledger API URL.')
+  const connection = { apiUrl: checkedUrl(apiUrl), token: checkedToken(token), simulated: isSimulated() }
   return { ...connection, participantId: await ledger.participantId(connection) }
 }
 
