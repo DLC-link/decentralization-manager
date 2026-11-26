@@ -190,8 +190,16 @@ pub async fn get_governance(
             mut actions,
             mut domain_actions,
             next_cursor,
+            confirmations_capped,
             ..
         }) => {
+            // A capped read may have missed a live confirmation, so it marks
+            // nothing. Its orphans then stay out, as on `main`.
+            let timeouts = if confirmations_capped {
+                ExpireTimeouts::new()
+            } else {
+                timeouts
+            };
             mark_stuck(
                 &mut actions,
                 &mut domain_actions,
@@ -5384,6 +5392,49 @@ mod confirmations_feed_tests {
                 json!(true),
                 "{proposals} proposals"
             );
+        }
+        Ok(())
+    }
+
+    /// The confirmation read stops at 5,000 contracts. A read that reached
+    /// that bound may have missed a live confirmation, so it marks nothing and
+    /// leaves its orphans out. One contract fewer still marks the orphan.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_capped_confirmation_read_marks_nothing(pool: SqlitePool) -> Result {
+        const MAX_CONFIRMATIONS_SCANNED: usize = 5_000;
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        for (confirmations, marked) in [
+            (MAX_CONFIRMATIONS_SCANNED - 1, true),
+            (MAX_CONFIRMATIONS_SCANNED, false),
+        ] {
+            let mut contracts = vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ];
+            contracts.extend((1..confirmations).map(|n| {
+                domain_confirmation(
+                    &format!("00dom-{n}"),
+                    &format!("00gone-{n}"),
+                    &member,
+                    expired,
+                )
+            }));
+            let ledger = AcsLedger {
+                contracts: Arc::new(contracts),
+                ..AcsLedger::default()
+            };
+
+            let body = feed(&pool, &ledger, &party).await?;
+
+            let listed = holding(&body["domain_actions"], "00dom-marked");
+            assert_eq!(listed.is_ok(), marked, "{confirmations} confirmations");
+            if let Ok(action) = listed {
+                assert_eq!(action["cannot_be_archived"], json!(true));
+            }
         }
         Ok(())
     }

@@ -570,14 +570,22 @@ pub async fn get_governance_confirmations(
     let mut domain_confirmations_complete = true;
 
     // Bounded, not cached: see read_domain_confirmations.
-    let cached = match read_domain_confirmations(config, party_id, token.clone(), packages).await {
-        Ok(read) => read,
-        Err(e) => {
-            tracing::warn!("Could not read confirmations: {e}");
-            domain_confirmations_complete = false;
-            (HashMap::new(), HashMap::new())
-        }
-    };
+    let (cached, confirmations_capped) =
+        match read_domain_confirmations(config, party_id, token.clone(), packages).await {
+            Ok(read) => read,
+            Err(e) => {
+                tracing::warn!("Could not read confirmations: {e}");
+                domain_confirmations_complete = false;
+                ((HashMap::new(), HashMap::new()), false)
+            }
+        };
+    if confirmations_capped {
+        tracing::warn!(
+            %party_id,
+            "The confirmation read stopped at {MAX_CONFIRMATIONS_SCANNED} contracts, so no \
+             action is marked as one that cannot be archived"
+        );
+    }
     confirmations_by_hash.extend(cached.0.clone());
 
     // One batch of proposals, not the party's whole history.
@@ -618,6 +626,7 @@ pub async fn get_governance_confirmations(
     if first_page
         && next_cursor.is_some()
         && proposals_read_ok
+        && !confirmations_capped
         && decman_lib::catalog::templates::governable_action_interface(packages).is_ok()
     {
         let marked: Vec<&String> = cached
@@ -703,6 +712,7 @@ pub async fn get_governance_confirmations(
         domain_actions,
         next_cursor,
         complete: proposal_infos_complete && domain_confirmations_complete && orphan_scan_ok,
+        confirmations_capped,
     })
 }
 
@@ -714,6 +724,10 @@ pub struct GovernanceQueue {
     /// False when a read behind the batch failed and left cards out. A caller
     /// that counts the queue must not take an incomplete batch as empty.
     pub complete: bool,
+    /// True when the confirmation read reached [`MAX_CONFIRMATIONS_SCANNED`].
+    /// It may have left out a live confirmation, so the batch gives no
+    /// "cannot be archived" marks.
+    pub confirmations_capped: bool,
 }
 
 /// The parties each confirmation's latest expire attempt named as
@@ -913,7 +927,8 @@ fn domain_confirmation_dto(parsed: ParsedDomainConfirmation) -> DomainConfirmati
     }
 }
 
-/// Fetch governance confirmations for a specific template
+/// Fetch governance confirmations for a specific template. Returns whether
+/// the read reached [`MAX_CONFIRMATIONS_SCANNED`].
 async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
@@ -921,19 +936,21 @@ async fn fetch_governance_for_template(
     template: &decman_lib::framework::TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
-) -> Result {
+) -> Result<bool> {
     let event_format = party_event_format(
         party_id,
         vec![template_filter(template.into(), false)],
         true,
     );
 
+    let mut seen = 0usize;
     for_each_active_contract(
         config,
         token,
         event_format,
         Some(MAX_CONFIRMATIONS_SCANNED),
         |created| {
+            seen += 1;
             if created.template_id.as_ref().is_some_and(|t| {
                 t.module_name == "Governance.Confirmation"
                     && t.entity_name == "GovernanceConfirmation"
@@ -963,7 +980,7 @@ async fn fetch_governance_for_template(
     )
     .await?;
 
-    Ok(())
+    Ok(seen >= MAX_CONFIRMATIONS_SCANNED)
 }
 
 /// Resolve each `TransferInstruction` cid captured on
@@ -1166,19 +1183,21 @@ const ABSENT_TEMPLATE_ERRORS: [&str; 2] = [
 
 /// Optional packages and templates can be absent. Other failures leave a
 /// read incomplete.
-fn allow_absent_confirmation_package(result: Result<()>) -> Result<()> {
+fn allow_absent_confirmation_package<T: Default>(result: Result<T>) -> Result<T> {
     match result {
         Err(error)
             if canton_error_id(&error)
                 .is_some_and(|id| ABSENT_TEMPLATE_ERRORS.contains(&id.as_str())) =>
         {
-            Ok(())
+            Ok(T::default())
         }
         other => other,
     }
 }
 
-/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`].
+/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`]
+/// for each template. Also says whether a template's read reached that bound,
+/// and so may have left confirmations out.
 ///
 /// Deliberately uncached. These are small — a few hundred bytes each — and a
 /// confirmation has to show up on the next read, not once a TTL lapses: caching
@@ -1189,11 +1208,12 @@ async fn read_domain_confirmations(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<ParsedConfirmations> {
+) -> Result<(ParsedConfirmations, bool)> {
     let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
     let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
+    let mut capped = false;
     for t in &decman_lib::catalog::templates::governance_templates(packages) {
-        allow_absent_confirmation_package(
+        capped |= allow_absent_confirmation_package(
             fetch_governance_for_template(
                 config,
                 party_id,
@@ -1206,7 +1226,7 @@ async fn read_domain_confirmations(
         )?;
     }
 
-    Ok((by_hash, domain))
+    Ok(((by_hash, domain), capped))
 }
 
 /// One batch of a party's open proposals, plus where to resume.
@@ -1255,6 +1275,7 @@ pub async fn page_proposal_summaries(
         .unwrap_or(0);
     let confirmations = read_domain_confirmations(config, party_id, token_for_counts, packages)
         .await
+        .map(|(read, _)| read)
         .unwrap_or_default();
     let summaries = summaries
         .into_iter()
@@ -4746,7 +4767,7 @@ mod domain_confirmation_page_tests {
         ))
         .context("reading confirmations");
 
-        assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
         assert!(allow_absent_confirmation_package(Ok(())).is_ok());
     }
 
@@ -4760,7 +4781,7 @@ mod domain_confirmation_page_tests {
         ))
         .context("reading confirmations");
 
-        assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
     }
 
     #[test]
@@ -4772,7 +4793,7 @@ mod domain_confirmation_page_tests {
         ] {
             let expected = format!("{error:#}");
 
-            let error = allow_absent_confirmation_package(Err(error))
+            let error = allow_absent_confirmation_package::<()>(Err(error))
                 .expect_err("a failed confirmation read must not return a partial result");
 
             assert_eq!(format!("{error:#}"), expected);
