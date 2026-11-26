@@ -221,6 +221,16 @@ pub struct GovernanceMediatorTimeoutRow {
     pub observed_at: i64,
 }
 
+/// A confirmation an operator hid on this node.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GovernanceHiddenConfirmationRow {
+    pub party_id: String,
+    pub contract_id: String,
+    /// The admin's user id, the token's `sub`.
+    pub hidden_by: String,
+    pub hidden_at: i64,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct GovernanceAuditRow {
     pub id: i64,

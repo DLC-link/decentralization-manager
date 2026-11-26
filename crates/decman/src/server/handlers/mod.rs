@@ -28,7 +28,7 @@ pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_coupon_reassignment_delegation, get_governance, get_governance_audit,
     get_governance_chain_audit, get_governance_state, get_known_members, get_proposals_page,
-    get_reward_status, propose_action,
+    get_reward_status, hide_confirmations, propose_action, unhide_confirmations,
 };
 // Crate-internal governance helpers reused by the reward-automation and
 // governance-poller modules, re-exported here so they are reachable through the

@@ -530,6 +530,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/governance/execute` | POST | Executes a confirmed governance action |
 | `/governance/expire` | POST | Expires a stale governance confirmation |
 | `/governance/cancel` | POST | Cancels a governance confirmation |
+| `/governance/hide` | POST | Hides an action that cannot be archived, on this node only |
+| `/governance/unhide` | POST | Lists a hidden action again |
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
 | `/services/registrar` | GET | Returns RegistrarService contracts |

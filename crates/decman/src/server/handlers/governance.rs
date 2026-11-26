@@ -54,20 +54,23 @@ use crate::{
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::{
         rows::{ChainAuditCacheRow, GovernanceMediatorTimeoutRow},
-        schema::{SchemaRead, SchemaWrite},
+        schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
+        audit::{
+            AuditActor, AuditEvent, AuditParams, HidingAuditEvent, log_governance_audit,
+            log_hiding_failure, with_proposal_cid, write_hiding_audit,
+        },
         chain_audit,
         ledger_rejection::{
             LedgerConnectionFailed, ReadTimedOut, mediator_timeout, submission_failure,
         },
         middleware::require_admin,
         queries::{
-            ExpireTimeouts, GovernanceQueue, get_governance_confirmations,
+            ExpireTimeouts, GovernanceQueue, apply_hidden, get_governance_confirmations,
             get_governance_state as query_governance_state, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
@@ -82,9 +85,9 @@ use crate::{
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             DomainGovernanceAction, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HideConfirmationsRequest,
+            KnownMember, KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse,
+            ProposalType, ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
             chain_audit_entry_from_row,
         },
     },
@@ -107,10 +110,89 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
     }
 }
 
+/// Query parameters for `GET /governance/confirmations`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ConfirmationsQuery {
+    pub party_id: CantonId,
+    /// Proposals read from the ledger per request. Defaults to 25.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// `next_cursor` from the previous batch. Absent starts at the top.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Also return the actions hidden on this node, marked `hidden`.
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+/// This node's evidence of what cannot be archived, and what it hid.
+async fn read_archival_state(
+    db: &SqlitePool,
+    party_id: &CantonId,
+) -> Result<(ExpireTimeouts, HashSet<String>)> {
+    let timeouts = expire_timeouts(
+        db.get_mediator_timeouts(party_id)
+            .await
+            .context("Failed to read governance mediator timeouts")?,
+    );
+    let hidden = db
+        .get_hidden_confirmations(party_id)
+        .await
+        .context("Failed to read hidden governance confirmations")?
+        .into_iter()
+        .map(|row| row.contract_id)
+        .collect();
+    Ok((timeouts, hidden))
+}
+
+/// This node's evidence and hidden confirmations for `party_id`. Both come
+/// from this node's database. When a read fails, the list goes out with no
+/// marks and nothing hidden: showing a hidden action beats an empty list. The
+/// error stays in the log, not in the response.
+async fn archival_state(db: &SqlitePool, party_id: &CantonId) -> (ExpireTimeouts, HashSet<String>) {
+    read_archival_state(db, party_id).await.unwrap_or_else(|e| {
+        tracing::error!(%party_id, "Listing governance actions without local marks: {e:#}");
+        (ExpireTimeouts::new(), HashSet::new())
+    })
+}
+
+/// Mark the actions that cannot be archived, then apply this node's hidden
+/// confirmations to them.
+fn apply_archival_state(
+    queue: &mut GovernanceQueue,
+    timeouts: &ExpireTimeouts,
+    hidden: &HashSet<String>,
+    include_hidden: bool,
+) {
+    // A capped read may have missed a live confirmation, so it marks
+    // nothing. Its orphans then stay out, as on `main`.
+    let no_timeouts = ExpireTimeouts::new();
+    let timeouts = if queue.confirmations_capped {
+        &no_timeouts
+    } else {
+        timeouts
+    };
+    mark_stuck(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        timeouts,
+        chrono::Utc::now().timestamp(),
+    );
+    apply_hidden(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        hidden,
+        include_hidden,
+    );
+}
+
 /// Get governance confirmations with parsed actions
+///
+/// An action hidden on this node is left out unless `include_hidden` is
+/// set.
 #[utoipa::path(
     tag = "Governance",
-    params(GovernanceQuery),
+    params(ConfirmationsQuery),
     responses(
         (status = 200, description = "Governance confirmations", body = GovernanceResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -120,7 +202,7 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
 pub async fn get_governance(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
+    query: web::Query<ConfirmationsQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
     let may_act = require_admin(&http_req, data.admin_role.as_deref()).is_ok();
@@ -156,14 +238,12 @@ pub async fn get_governance(
         _ => None,
     };
 
-    let timeouts = match data.db.get_mediator_timeouts(party_id).await {
-        Ok(rows) => expire_timeouts(rows),
-        Err(e) => {
-            tracing::error!(%party_id, "Failed to read governance mediator timeouts: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: TIMEOUTS_READ_FAILED.to_string(),
-            });
-        }
+    let (timeouts, hidden) = archival_state(&data.db, party_id).await;
+    let none_left_out = HashSet::new();
+    let left_out = if query.include_hidden {
+        &none_left_out
+    } else {
+        &hidden
     };
 
     match get_governance_confirmations(
@@ -176,6 +256,7 @@ pub async fn get_governance(
         batch,
         from,
         &timeouts,
+        left_out,
     )
     .await
     {
@@ -186,26 +267,14 @@ pub async fn get_governance(
         }) => HttpResponse::InternalServerError().json(ErrorResponse {
             error: FEED_READ_FAILED.to_string(),
         }),
-        Ok(GovernanceQueue {
-            mut actions,
-            mut domain_actions,
-            next_cursor,
-            confirmations_capped,
-            ..
-        }) => {
-            // A capped read may have missed a live confirmation, so it marks
-            // nothing. Its orphans then stay out, as on `main`.
-            let timeouts = if confirmations_capped {
-                ExpireTimeouts::new()
-            } else {
-                timeouts
-            };
-            mark_stuck(
-                &mut actions,
-                &mut domain_actions,
-                &timeouts,
-                chrono::Utc::now().timestamp(),
-            );
+        Ok(mut queue) => {
+            apply_archival_state(&mut queue, &timeouts, &hidden, query.include_hidden);
+            let GovernanceQueue {
+                actions,
+                mut domain_actions,
+                next_cursor,
+                ..
+            } = queue;
             if !may_act {
                 withhold_payloads(&mut domain_actions);
             }
@@ -233,11 +302,6 @@ pub async fn get_governance(
 /// name an address, goes to the server log only.
 const FEED_READ_FAILED: &str =
     "Failed to fetch governance confirmations: a ledger read failed. See the DecMan server log.";
-
-/// The answer to a confirmations read whose own database read failed. The
-/// cause, which can name a table, goes to the server log only.
-const TIMEOUTS_READ_FAILED: &str = "Failed to fetch governance confirmations: a read of the \
-                                    DecMan database failed. See the DecMan server log.";
 
 /// Get governance state (GovernanceRules contract state)
 /// Query parameters for the paged proposals feed.
@@ -1876,6 +1940,205 @@ pub async fn cancel_confirmation(
         submission,
     )
     .await
+}
+
+/// The most confirmation ids one hide or unhide request may name. An action
+/// has at most one confirmation per member, far below this.
+const MAX_HIDDEN_PER_REQUEST: usize = 100;
+
+/// The longest confirmation id a hide or unhide request may name, in bytes.
+/// A Canton contract id is well below this.
+const MAX_CONFIRMATION_ID_LEN: usize = 256;
+
+/// The confirmation ids of a hide or unhide request, each once.
+///
+/// The request is refused unless this node serves the party. That check reads
+/// only the local party list, so the rows stay bounded without a ledger read.
+#[allow(clippy::result_large_err)]
+async fn requested_confirmations(
+    data: &AppState,
+    body: &HideConfirmationsRequest,
+) -> std::result::Result<Vec<String>, HttpResponse> {
+    let refuse = |error: String| Err(HttpResponse::BadRequest().json(ErrorResponse { error }));
+    if body.confirmation_cids.is_empty() {
+        return refuse("Name at least one confirmation.".to_string());
+    }
+    if body.confirmation_cids.len() > MAX_HIDDEN_PER_REQUEST {
+        return refuse(format!(
+            "Name at most {MAX_HIDDEN_PER_REQUEST} confirmations in one request."
+        ));
+    }
+    if body
+        .confirmation_cids
+        .iter()
+        .any(|cid| cid.trim().is_empty())
+    {
+        return refuse("A confirmation id is empty.".to_string());
+    }
+    if body
+        .confirmation_cids
+        .iter()
+        .any(|cid| cid.len() > MAX_CONFIRMATION_ID_LEN)
+    {
+        return refuse(format!(
+            "A confirmation id is longer than {MAX_CONFIRMATION_ID_LEN} bytes."
+        ));
+    }
+    let served = data
+        .party_credentials
+        .read()
+        .await
+        .iter()
+        .any(|credentials| credentials.dec_party_id == body.party_id);
+    if !served {
+        return Err(HttpResponse::NotFound().json(ErrorResponse {
+            error: "This node does not serve the party.".to_string(),
+        }));
+    }
+    let mut cids = body.confirmation_cids.clone();
+    cids.sort();
+    cids.dedup();
+    Ok(cids)
+}
+
+/// The cause a failed hide or unhide gives its caller and its audit row. The
+/// database error, which names tables, goes to the server log only.
+const HIDING_WRITE_FAILED: &str = "the local database write failed. See the DecMan server log.";
+
+/// The answer to a hide or unhide from a token without a subject. Both rows
+/// name who made the change, so such a token would name nobody.
+fn without_subject(actor: &AuditActor) -> Option<HttpResponse> {
+    actor.sub.is_empty().then(|| {
+        HttpResponse::Forbidden().json(ErrorResponse {
+            error: "The token has no subject, so the change cannot record who made it.".to_string(),
+        })
+    })
+}
+
+/// Hides or unhides `cids` and writes the audit row in one transaction, so a
+/// failed audit write leaves the hidden set as it was. On a failure the server
+/// attempts a failure row outside the rolled-back transaction; that write
+/// fails too when the audit table itself is broken. Returns how many
+/// confirmations an unhide found hidden, or how many a hide named.
+async fn change_hidden(
+    db: &SqlitePool,
+    event: HidingAuditEvent,
+    party_id: &CantonId,
+    cids: &[String],
+    actor: &AuditActor,
+) -> std::result::Result<u64, &'static str> {
+    let change = async {
+        let mut tx = db.begin_transaction().await?;
+        let changed = match event {
+            HidingAuditEvent::Hide => {
+                // The `sub` is stable, while an email can change hands.
+                tx.hide_confirmations(party_id, cids, &actor.sub).await?;
+                cids.len() as u64
+            }
+            HidingAuditEvent::Unhide => tx.unhide_confirmations(party_id, cids).await?,
+        };
+        write_hiding_audit(&mut tx, event, party_id, cids, actor).await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(changed)
+    };
+    match change.await {
+        Ok(changed) => Ok(changed),
+        Err(e) => {
+            tracing::error!(%party_id, ?event, "Failed to change hidden confirmations: {e:#}");
+            log_hiding_failure(db, event, party_id, cids, actor, HIDING_WRITE_FAILED).await;
+            Err(HIDING_WRITE_FAILED)
+        }
+    }
+}
+
+/// Hide an action that cannot be archived, on this node only
+///
+/// Stores the confirmation ids and writes an audit row. Nothing is sent to the
+/// ledger, and other nodes still list the action. `GET /governance/confirmations`
+/// hides an action only while it cannot be archived and every one of its
+/// confirmations is hidden.
+#[utoipa::path(
+    tag = "Governance",
+    request_body = HideConfirmationsRequest,
+    responses(
+        (status = 200, description = "Confirmations hidden", body = MessageResponse),
+        (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required, or the token has no subject", body = ErrorResponse),
+        (status = 404, description = "This node does not serve the party", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/hide")]
+pub async fn hide_confirmations(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<HideConfirmationsRequest>,
+) -> impl Responder {
+    let actor = match require_admin(&http_req, data.admin_role.as_deref()) {
+        Ok(principal) => AuditActor::from(&principal),
+        Err(resp) => return resp,
+    };
+    if let Some(refusal) = without_subject(&actor) {
+        return refusal;
+    }
+    let cids = match requested_confirmations(&data, &body).await {
+        Ok(cids) => cids,
+        Err(resp) => return resp,
+    };
+    let party_id = &body.party_id;
+    match change_hidden(&data.db, HidingAuditEvent::Hide, party_id, &cids, &actor).await {
+        Ok(_) => HttpResponse::Ok().json(MessageResponse {
+            message: format!("Confirmations hidden on this node: {}.", cids.len()),
+        }),
+        Err(cause) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to hide the confirmations: {cause}"),
+        }),
+    }
+}
+
+/// Unhide confirmations hidden on this node
+///
+/// Deletes the stored hidden confirmations and writes an audit row. Nothing is
+/// sent to the ledger. The action is listed again by default.
+#[utoipa::path(
+    tag = "Governance",
+    request_body = HideConfirmationsRequest,
+    responses(
+        (status = 200, description = "Confirmations unhidden", body = MessageResponse),
+        (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required, or the token has no subject", body = ErrorResponse),
+        (status = 404, description = "This node does not serve the party", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/unhide")]
+pub async fn unhide_confirmations(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<HideConfirmationsRequest>,
+) -> impl Responder {
+    let actor = match require_admin(&http_req, data.admin_role.as_deref()) {
+        Ok(principal) => AuditActor::from(&principal),
+        Err(resp) => return resp,
+    };
+    if let Some(refusal) = without_subject(&actor) {
+        return refusal;
+    }
+    let cids = match requested_confirmations(&data, &body).await {
+        Ok(cids) => cids,
+        Err(resp) => return resp,
+    };
+    let party_id = &body.party_id;
+    match change_hidden(&data.db, HidingAuditEvent::Unhide, party_id, &cids, &actor).await {
+        Ok(unhidden) => HttpResponse::Ok().json(MessageResponse {
+            message: format!("Confirmations unhidden on this node: {unhidden}."),
+        }),
+        Err(cause) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to unhide the confirmations: {cause}"),
+        }),
+    }
 }
 
 /// Retract a proposal the caller proposed
@@ -4862,7 +5125,7 @@ mod confirmations_feed_tests {
         },
     };
 
-    use actix_web::{App, test as actix_test};
+    use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
     use canton_proto_rs::com::daml::ledger::api::v2::{
         ActiveContract, GenMap, GetActiveContractsPageRequest, GetActiveContractsPageResponse,
         GetActiveContractsResponse, GetLedgerEndRequest, GetLedgerEndResponse, Identifier, Record,
@@ -4880,7 +5143,9 @@ mod confirmations_feed_tests {
 
     use super::*;
     use crate::{
-        auth::MockAuthRegistry, db::MIGRATOR, server::ledger_rejection::fixtures,
+        auth::MockAuthRegistry,
+        db::MIGRATOR,
+        server::{ledger_rejection::fixtures, middleware::AuthMiddleware},
         signing::fake_admin_api::unary,
     };
 
@@ -5184,8 +5449,8 @@ mod confirmations_feed_tests {
         feed_with(pool, ledger, party, "").await
     }
 
-    /// The feed of `party` against `ledger`, with `extra` appended to the
-    /// query string.
+    /// The feed of `party` against `ledger`, read as an admin, with `extra`
+    /// appended to the query string.
     async fn feed_with(
         pool: &SqlitePool,
         ledger: &AcsLedger,
@@ -5195,6 +5460,7 @@ mod confirmations_feed_tests {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
                 .service(get_governance),
         )
         .await;
@@ -5202,6 +5468,7 @@ mod confirmations_feed_tests {
             .uri(&format!(
                 "/governance/confirmations?party_id={party}{extra}"
             ))
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
             .to_request();
         let response = actix_test::call_service(&app, request).await;
         anyhow::ensure!(
@@ -5222,6 +5489,238 @@ mod confirmations_feed_tests {
             .iter()
             .find(|action| action["confirmations"][0]["contract_id"] == contract_id)
             .with_context(|| format!("no action holds {contract_id}"))
+    }
+
+    /// Whether any entry of `list` holds the confirmation `contract_id`.
+    fn lists(list: &serde_json::Value, contract_id: &str) -> bool {
+        list.as_array().is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action["confirmations"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c["contract_id"] == contract_id))
+            })
+        })
+    }
+
+    /// Posts `confirmation_cids` of `party` to `uri`, the hide or the unhide
+    /// route, as an admin.
+    async fn post_ids(
+        pool: &SqlitePool,
+        uri: &str,
+        party: &CantonId,
+        confirmation_cids: &[&str],
+    ) -> Result<StatusCode> {
+        let data = AppState::for_test_on(None, pool.clone());
+        super::hiding_tests::serve(&data, party).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap(AuthMiddleware)
+                .service(hide_confirmations)
+                .service(unhide_confirmations),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({ "party_id": party, "confirmation_cids": confirmation_cids }))
+            .to_request();
+        Ok(actix_test::call_service(&app, request).await.status())
+    }
+
+    /// A hidden orphan that the feed leaves out anyway starts no scan of the
+    /// active proposal ids. A read with `include_hidden` lists it, so that
+    /// read scans. So does a read with another marked orphan that is shown.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_orphan_starts_no_proposal_scan(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        for cid in ["00dom-hidden", "00dom-shown"] {
+            pool.record_mediator_timeout(&party, cid, &[member.to_string()])
+                .await?;
+        }
+        pool.hide_confirmations(&party, &["00dom-hidden".to_string()], "admin")
+            .await?;
+        // The first page reads the proposals once. A scan reads them again.
+        for (shown, extra, reads, hidden_listed) in [
+            (false, "", 1, false),
+            (false, "&include_hidden=true", 2, true),
+            (true, "", 2, false),
+        ] {
+            let mut contracts = vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-hidden", "00gone", &member, expired),
+            ];
+            if shown {
+                contracts.push(domain_confirmation(
+                    "00dom-shown",
+                    "00gone-b",
+                    &member,
+                    expired,
+                ));
+            }
+            let ledger = AcsLedger {
+                contracts: Arc::new(contracts),
+                proposals: Arc::new(
+                    ["00p1", "00p2", "00p3"]
+                        .iter()
+                        .map(|cid| proposal(cid, &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+
+            let body = feed_with(&pool, &ledger, &party, &format!("&limit=2{extra}")).await?;
+
+            let case = format!("shown: {shown}, query: {extra}");
+            assert_eq!(
+                ledger.proposal_reads.load(Ordering::SeqCst),
+                reads,
+                "{case}"
+            );
+            assert_eq!(
+                lists(&body["domain_actions"], "00dom-hidden"),
+                hidden_listed,
+                "{case}: {body}"
+            );
+            assert_eq!(
+                lists(&body["domain_actions"], "00dom-shown"),
+                shown,
+                "{case}: {body}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A hide records the confirmations the feed lists: each party's newest
+    /// one. An older confirmation from the same party stays unrecorded. The
+    /// orphan is still hidden, so it must still start no scan.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_orphan_with_an_older_confirmation_starts_no_scan(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let mut older = domain_confirmation("00dom-older", "00gone", &member, expired - 60);
+        older.created_at = Some(prost_types::Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let mut newer = domain_confirmation("00dom-newer", "00gone", &member, expired);
+        newer.created_at = Some(prost_types::Timestamp {
+            seconds: 200,
+            nanos: 0,
+        });
+        pool.record_mediator_timeout(&party, "00dom-newer", &[member.to_string()])
+            .await?;
+        pool.hide_confirmations(&party, &["00dom-newer".to_string()], "admin")
+            .await?;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member]), older, newer]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            ..AcsLedger::default()
+        };
+
+        let body = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+        // The first page reads the proposals once. A scan reads them again.
+        assert_eq!(ledger.proposal_reads.load(Ordering::SeqCst), 1);
+        assert!(!lists(&body["domain_actions"], "00dom-newer"), "{body}");
+        Ok(())
+    }
+
+    /// Issue #615 asks that an operator can hide an action that cannot be
+    /// archived, on this node. The feed then leaves it out, `include_hidden`
+    /// brings it back marked, and an unhide or a new confirmation lists it
+    /// again. Hiding never removes an action that can still be archived.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_action_stays_hidden_until_unhidden_or_confirmed_again(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let (former, other_former) = (id("former", "cc"), id("former-b", "dd"));
+        let now = chrono::Utc::now().timestamp();
+        let stuck_action = ActionType::GovernanceSetThreshold { new_threshold: 3 };
+        let contracts = vec![
+            rules(&party, &[&member]),
+            self_confirmation("00self-former", &stuck_action, &former, now - 3600)?,
+            self_confirmation(
+                "00self-live",
+                &ActionType::GovernanceSetThreshold { new_threshold: 1 },
+                &member,
+                now + 3600,
+            )?,
+            domain_confirmation("00dom-former", "00gone", &former, now - 3600),
+        ];
+        let ledger = AcsLedger {
+            contracts: Arc::new(contracts.clone()),
+            ..AcsLedger::default()
+        };
+        // Each expire of a former member's confirmation timed out naming it.
+        for (cid, confirmer) in [
+            ("00self-former", &former),
+            ("00dom-former", &former),
+            ("00self-former-b", &other_former),
+        ] {
+            pool.record_mediator_timeout(&party, cid, &[confirmer.to_string()])
+                .await?;
+        }
+        let all = ["00self-former", "00self-live", "00dom-former"];
+
+        let status = post_ids(&pool, "/governance/hide", &party, &all).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let default = feed(&pool, &ledger, &party).await?;
+        assert!(!lists(&default["actions"], "00self-former"), "{default}");
+        assert!(
+            !lists(&default["domain_actions"], "00dom-former"),
+            "{default}"
+        );
+        let live = holding(&default["actions"], "00self-live")?;
+        assert_eq!(live["hidden"], json!(false));
+
+        let with_hidden = feed_with(&pool, &ledger, &party, "&include_hidden=true").await?;
+        let hidden = holding(&with_hidden["actions"], "00self-former")?;
+        assert_eq!(hidden["hidden"], json!(true));
+        assert_eq!(hidden["cannot_be_archived"], json!(true));
+        let hidden = holding(&with_hidden["domain_actions"], "00dom-former")?;
+        assert_eq!(hidden["hidden"], json!(true));
+        let live = holding(&with_hidden["actions"], "00self-live")?;
+        assert_eq!(live["hidden"], json!(false));
+
+        // A second former member's confirmation of the same action arrives.
+        let mut confirmed_again = contracts.clone();
+        confirmed_again.push(self_confirmation(
+            "00self-former-b",
+            &stuck_action,
+            &other_former,
+            now - 60,
+        )?);
+        let ledger_again = AcsLedger {
+            contracts: Arc::new(confirmed_again),
+            ..AcsLedger::default()
+        };
+        let again = feed(&pool, &ledger_again, &party).await?;
+        let shown = holding(&again["actions"], "00self-former")
+            .or_else(|_| holding(&again["actions"], "00self-former-b"))?;
+        assert!(lists(&again["actions"], "00self-former-b"), "{again}");
+        assert_eq!(shown["hidden"], json!(false));
+        assert_eq!(shown["cannot_be_archived"], json!(true));
+
+        let status = post_ids(&pool, "/governance/unhide", &party, &["00dom-former"]).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let unhidden = feed(&pool, &ledger, &party).await?;
+        let shown = holding(&unhidden["domain_actions"], "00dom-former")?;
+        assert_eq!(shown["hidden"], json!(false));
+        assert!(!lists(&unhidden["actions"], "00self-former"), "{unhidden}");
+        Ok(())
     }
 
     /// Issue #615: an action whose expired confirmations all failed their
@@ -5539,37 +6038,6 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
-    /// The answer to a failed read of this node's database is a fixed text.
-    /// The database error names a table, so it goes to the log only.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_failed_database_read_answers_a_fixed_text(pool: SqlitePool) -> Result {
-        let party = id("dec", "ab");
-        let member = id("member-a", "aa");
-        let ledger = AcsLedger {
-            contracts: Arc::new(vec![rules(&party, &[&member])]),
-            ..AcsLedger::default()
-        };
-        sqlx::query("DROP TABLE governance_mediator_timeout")
-            .execute(&pool)
-            .await?;
-        let app = actix_test::init_service(
-            App::new()
-                .app_data(state(pool, ledger.serve()?).await?)
-                .service(get_governance),
-        )
-        .await;
-        let request = actix_test::TestRequest::get()
-            .uri(&format!("/governance/confirmations?party_id={party}"))
-            .to_request();
-
-        let response = actix_test::call_service(&app, request).await;
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body: serde_json::Value = actix_test::read_body_json(response).await;
-        assert_eq!(body["error"], json!(TIMEOUTS_READ_FAILED));
-        Ok(())
-    }
-
     /// A read that leaves confirmations out must not look like a short list.
     /// The answer names the failure, and keeps the ledger's text in the log.
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -5652,6 +6120,7 @@ mod confirmations_feed_tests {
             25,
             None,
             &ExpireTimeouts::new(),
+            &HashSet::new(),
         )
         .await?;
 
@@ -5725,6 +6194,73 @@ mod confirmations_feed_tests {
             );
             assert_eq!(action["cannot_be_archived"], json!(true), "{cid}");
         }
+        Ok(())
+    }
+
+    /// A hide rests on the latest expire attempt. When a later expire times
+    /// out without naming the confirmer, the action may be archivable again,
+    /// so the feed must list it although its confirmation is still hidden.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_action_returns_when_a_later_expire_no_longer_names_its_confirmer(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = id("dec", "ab");
+        let (member, other) = (id("member-a", "aa"), id("member-b", "bb"));
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member, &other]),
+                self_confirmation(
+                    "00self",
+                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
+                    &member,
+                    chrono::Utc::now().timestamp() - 3600,
+                )?,
+            ]),
+            ..AcsLedger::default()
+        };
+        let expire = |unresponsive: &CantonId| {
+            let mut ledger = super::mediator_timeout_tests::RejectingLedger::new();
+            ledger.rejection = Some(fixtures::mediator_timeout(&unresponsive.to_string()));
+            ledger.release.notify_one();
+            ledger
+        };
+        let body = json!({
+            "party_id": party,
+            "rules_contract_id": "00rules",
+            "confirmation_cid": "00self",
+        });
+
+        let offline = expire(&member);
+        let (status, error) = super::mediator_timeout_tests::post_to_writes(
+            &pool,
+            &offline,
+            "/governance/expire",
+            body.clone(),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert_eq!(
+            post_ids(&pool, "/governance/hide", &party, &["00self"]).await?,
+            StatusCode::OK
+        );
+        let hidden = feed(&pool, &ledger, &party).await?;
+        assert!(!lists(&hidden["actions"], "00self"), "{hidden}");
+
+        let elsewhere = expire(&other);
+        let (status, error) = super::mediator_timeout_tests::post_to_writes(
+            &pool,
+            &elsewhere,
+            "/governance/expire",
+            body,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+
+        let listed = feed(&pool, &ledger, &party).await?;
+        let action = holding(&listed["actions"], "00self")?;
+        assert_eq!(action["cannot_be_archived"], json!(false));
+        assert_eq!(action["hidden"], json!(false));
         Ok(())
     }
 }
@@ -6018,5 +6554,498 @@ mod paid_accept_disclosure_tests {
             "Failed to execute action: Failed to fetch the open mining rounds from scan (scan \
              answered 403 Forbidden). See the DecMan server log."
         );
+    }
+}
+
+#[cfg(test)]
+mod archival_state_tests {
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    fn party_id(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    fn self_action(hash: &str, cid: &str, confirmer: &CantonId, expires_at: i64) -> Result<Value> {
+        let action = json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        Ok(json!({
+            "action_hash": hash,
+            "action": action,
+            "confirmations": [{
+                "contract_id": cid,
+                "action": action,
+                "confirming_party": confirmer,
+                "created_at": 1,
+                "expires_at": expires_at,
+            }],
+            "confirmation_count": 1,
+            "executable_confirmation_cids": [],
+            "can_execute": false,
+        }))
+    }
+
+    /// A self action from a former member that expired, and a live one from a
+    /// current member. Only the first cannot be archived, once its expire
+    /// timed out naming the former member.
+    fn queue() -> Result<GovernanceQueue> {
+        let now = chrono::Utc::now().timestamp();
+        let (member, former) = (party_id("member")?, party_id("former")?);
+        let actions = vec![
+            serde_json::from_value(self_action("stuck", "00stuck", &former, now - 60)?)?,
+            serde_json::from_value(self_action("live", "00live", &member, now + 3600)?)?,
+        ];
+        Ok(GovernanceQueue {
+            actions,
+            domain_actions: vec![],
+            next_cursor: None,
+            complete: true,
+            confirmations_capped: false,
+        })
+    }
+
+    /// Records that the expire of `00stuck` timed out naming the former member.
+    async fn record_the_stuck_timeout(pool: &SqlitePool) -> Result {
+        let former = party_id("former")?.to_string();
+        pool.record_mediator_timeout(&party_id("dec")?, "00stuck", &[former])
+            .await
+    }
+
+    /// The action hashes the confirmations list returns, each with its
+    /// `hidden` mark.
+    async fn listed(pool: &SqlitePool, include_hidden: bool) -> Result<Vec<(String, bool)>> {
+        let mut queue = queue()?;
+        let (timeouts, hidden) = archival_state(pool, &party_id("dec")?).await;
+        apply_archival_state(&mut queue, &timeouts, &hidden, include_hidden);
+        Ok(queue
+            .actions
+            .into_iter()
+            .map(|a| (a.action_hash, a.hidden))
+            .collect())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_list_hides_a_hidden_action_until_it_is_unhidden(pool: SqlitePool) -> Result {
+        let party = party_id("dec")?;
+        record_the_stuck_timeout(&pool).await?;
+        let both = || vec![("stuck".to_string(), false), ("live".to_string(), false)];
+        assert_eq!(listed(&pool, false).await?, both());
+
+        // The live action's confirmation is hidden too, but it can be archived.
+        let ids = ["00stuck".to_string(), "00live".to_string()];
+        pool.hide_confirmations(&party, &ids, "admin").await?;
+
+        assert_eq!(listed(&pool, false).await?, [("live".to_string(), false)]);
+        assert_eq!(
+            listed(&pool, true).await?,
+            [("stuck".to_string(), true), ("live".to_string(), false)]
+        );
+
+        pool.unhide_confirmations(&party, &ids[..1]).await?;
+
+        assert_eq!(listed(&pool, false).await?, both());
+        Ok(())
+    }
+
+    /// A failed read of this node's marks must not empty the list. The list
+    /// then goes out unmarked, and a hidden action shows again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_local_read_lists_every_action_unmarked(pool: SqlitePool) -> Result {
+        record_the_stuck_timeout(&pool).await?;
+        pool.hide_confirmations(&party_id("dec")?, &["00stuck".to_string()], "admin")
+            .await?;
+        assert_eq!(listed(&pool, false).await?, [("live".to_string(), false)]);
+
+        for table in [
+            "governance_hidden_confirmation",
+            "governance_mediator_timeout",
+        ] {
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_gone"))
+                .execute(&pool)
+                .await?;
+
+            assert_eq!(
+                listed(&pool, false).await?,
+                [("stuck".to_string(), false), ("live".to_string(), false)],
+                "{table}"
+            );
+
+            sqlx::query(&format!("ALTER TABLE {table}_gone RENAME TO {table}"))
+                .execute(&pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn hiding_for_another_party_hides_nothing(pool: SqlitePool) -> Result {
+        record_the_stuck_timeout(&pool).await?;
+        let ids = ["00stuck".to_string()];
+        pool.hide_confirmations(&party_id("other")?, &ids, "admin")
+            .await?;
+
+        assert_eq!(
+            listed(&pool, false).await?,
+            [("stuck".to_string(), false), ("live".to_string(), false)]
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hiding_tests {
+    use actix_web::{
+        App, HttpMessage,
+        dev::Service,
+        http::{StatusCode, header::AUTHORIZATION},
+        test as actix_test,
+    };
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{
+        auth::{Principal, mock::MOCK_USER_ID},
+        config::{KeycloakConfig, PartyCredentials},
+        db::MIGRATOR,
+        server::middleware::AuthMiddleware,
+    };
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("dec::1220{}", "ab".repeat(32)))
+    }
+
+    /// Makes `party` one this node serves.
+    pub(super) async fn serve(data: &AppState, party: &CantonId) -> Result {
+        data.party_credentials.write().await.push(PartyCredentials {
+            dec_party_id: party.clone(),
+            member_party_id: CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?,
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig::default(),
+            auth0: None,
+            packages: PackageConfig::default(),
+        });
+        Ok(())
+    }
+
+    /// A test state on `pool` that serves the party of these tests.
+    async fn served_state(pool: &SqlitePool) -> Result<web::Data<AppState>> {
+        let data = AppState::for_test_on(None, pool.clone());
+        serve(&data, &party_id()?).await?;
+        Ok(data)
+    }
+
+    fn request(uri: &str, cids: &[&str]) -> Result<actix_test::TestRequest> {
+        Ok(actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({ "party_id": party_id()?, "confirmation_cids": cids })))
+    }
+
+    /// Sends one request to the hide and unhide routes, as an admin.
+    async fn send(pool: &SqlitePool, uri: &str, cids: &[&str]) -> Result<(StatusCode, Value)> {
+        send_to(served_state(pool).await?, uri, cids).await
+    }
+
+    /// Sends one request to the hide and unhide routes of `data`, as an admin.
+    async fn send_to(
+        data: web::Data<AppState>,
+        uri: &str,
+        cids: &[&str],
+    ) -> Result<(StatusCode, Value)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap(AuthMiddleware)
+                .service(hide_confirmations)
+                .service(unhide_confirmations),
+        )
+        .await;
+        let response = actix_test::call_service(&app, request(uri, cids)?.to_request()).await;
+        let status = response.status();
+        Ok((status, actix_test::read_body_json(response).await))
+    }
+
+    async fn hidden(pool: &SqlitePool) -> Result<Vec<String>> {
+        Ok(pool
+            .get_hidden_confirmations(&party_id()?)
+            .await?
+            .into_iter()
+            .map(|row| row.contract_id)
+            .collect())
+    }
+
+    #[actix_web::test]
+    async fn hide_and_unhide_require_the_admin_role() -> Result {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test_as_non_admin().await?)
+                .wrap(AuthMiddleware)
+                .service(hide_confirmations)
+                .service(unhide_confirmations),
+        )
+        .await;
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            let response =
+                actix_test::call_service(&app, request(uri, &["00stuck"])?.to_request()).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        Ok(())
+    }
+
+    /// The test state has no ledger. Hiding needs none.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hide_is_stored_once_per_confirmation_and_audited(pool: SqlitePool) -> Result {
+        let (status, body) = send(&pool, "/governance/hide", &["00b", "00a", "00a"]).await?;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["message"], "Confirmations hidden on this node: 2.");
+        assert_eq!(hidden(&pool).await?, ["00a", "00b"]);
+        let rows = pool.get_hidden_confirmations(&party_id()?).await?;
+        assert!(rows.iter().all(|r| r.hidden_by == MOCK_USER_ID));
+
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].event_type, "hide");
+        assert_eq!(audit[0].action_summary, "hide_confirmations");
+        assert_eq!(audit[0].status, "success");
+        assert_eq!(audit[0].governance_type, "none");
+        let details: Value = serde_json::from_str(&audit[0].details)?;
+        assert_eq!(details["confirmation_cids"], json!(["00a", "00b"]));
+        assert_eq!(details["admin_sub"], MOCK_USER_ID);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unhide_removes_the_hidden_confirmations_and_is_audited(pool: SqlitePool) -> Result {
+        let ids = vec!["00a".to_string(), "00b".to_string()];
+        pool.hide_confirmations(&party_id()?, &ids, "admin").await?;
+
+        let (status, body) = send(&pool, "/governance/unhide", &["00a", "00other"]).await?;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["message"], "Confirmations unhidden on this node: 1.");
+        assert_eq!(hidden(&pool).await?, ["00b"]);
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].event_type, "unhide");
+        assert_eq!(audit[0].action_summary, "unhide_confirmations");
+        assert_eq!(audit[0].status, "success");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_request_without_a_confirmation_is_refused(pool: SqlitePool) -> Result {
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            for cids in [&[][..], &["00a", " "][..]] {
+                let (status, body) = send(&pool, uri, cids).await?;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {cids:?}: {body}");
+            }
+        }
+
+        assert!(hidden(&pool).await?.is_empty());
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert!(audit.is_empty());
+        Ok(())
+    }
+
+    /// A hide or an unhide and its audit row commit together. When the row
+    /// cannot be written, the hidden set stays as it was.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_audit_write_undoes_the_change(pool: SqlitePool) -> Result {
+        pool.hide_confirmations(&party_id()?, &["00kept".to_string()], "admin")
+            .await?;
+        sqlx::query("DROP TABLE governance_audit")
+            .execute(&pool)
+            .await?;
+
+        let (status, body) = send(&pool, "/governance/hide", &["00new"]).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let (status, body) = send(&pool, "/governance/unhide", &["00kept"]).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+        assert_eq!(hidden(&pool).await?, ["00kept"]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hide_stores_the_admin_sub_and_no_email(pool: SqlitePool) -> Result {
+        let actor = AuditActor {
+            sub: "admin-sub".to_string(),
+            email: Some("admin@example.com".to_string()),
+        };
+
+        change_hidden(
+            &pool,
+            HidingAuditEvent::Hide,
+            &party_id()?,
+            &["00a".to_string()],
+            &actor,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let rows = pool.get_hidden_confirmations(&party_id()?).await?;
+        assert_eq!(rows[0].hidden_by, "admin-sub");
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        let details: Value = serde_json::from_str(&audit[0].details)?;
+        assert_eq!(details["admin_sub"], "admin-sub");
+        // Any signed-in user can read the audit trail.
+        assert!(details.get("admin_email").is_none(), "{details}");
+        Ok(())
+    }
+
+    /// The hidden row names who hid the action, so a token without a subject
+    /// cannot hide anything.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hide_by_a_token_without_a_subject_is_refused(pool: SqlitePool) -> Result {
+        let data = served_state(&pool).await?;
+        let roles: Vec<String> = data.admin_role.iter().cloned().collect();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap_fn(move |request, service| {
+                    request.extensions_mut().insert(Principal {
+                        sub: String::new(),
+                        issuer: "test".to_string(),
+                        roles: roles.clone(),
+                        email: Some("admin@example.com".to_string()),
+                    });
+                    service.call(request)
+                })
+                .service(hide_confirmations),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, request("/governance/hide", &["00a"])?.to_request())
+                .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = actix_test::read_body_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("no subject")),
+            "{body}"
+        );
+        assert!(hidden(&pool).await?.is_empty());
+        assert!(
+            pool.get_governance_audit(&party_id()?, 50, 0)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// The unhide row names who made the change too, so a token without a
+    /// subject cannot unhide anything either.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unhide_by_a_token_without_a_subject_is_refused(pool: SqlitePool) -> Result {
+        pool.hide_confirmations(&party_id()?, &["00a".to_string()], "admin")
+            .await?;
+        let data = served_state(&pool).await?;
+        let roles: Vec<String> = data.admin_role.iter().cloned().collect();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap_fn(move |request, service| {
+                    request.extensions_mut().insert(Principal {
+                        sub: String::new(),
+                        issuer: "test".to_string(),
+                        roles: roles.clone(),
+                        email: None,
+                    });
+                    service.call(request)
+                })
+                .service(unhide_confirmations),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, request("/governance/unhide", &["00a"])?.to_request())
+                .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hidden(&pool).await?, ["00a"]);
+        assert!(
+            pool.get_governance_audit(&party_id()?, 50, 0)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// A failed change answers and records a fixed cause. The database error
+    /// names a table, and any signed-in user can read the audit trail. With
+    /// the audit table writable, the failure row is written.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_change_records_its_cause_without_database_detail(pool: SqlitePool) -> Result {
+        sqlx::query("ALTER TABLE governance_hidden_confirmation RENAME TO broken")
+            .execute(&pool)
+            .await?;
+
+        for (uri, verb) in [
+            ("/governance/hide", "hide"),
+            ("/governance/unhide", "unhide"),
+        ] {
+            let (status, body) = send(&pool, uri, &["00a"]).await?;
+
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+            assert_eq!(
+                body["error"],
+                json!(format!(
+                    "Failed to {verb} the confirmations: {HIDING_WRITE_FAILED}"
+                )),
+                "{uri}"
+            );
+        }
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 2);
+        for row in audit {
+            assert_eq!(row.status, "failed");
+            assert_eq!(row.error_message.as_deref(), Some(HIDING_WRITE_FAILED));
+        }
+        Ok(())
+    }
+
+    /// The server stores what it is given, so a request is bounded: at most
+    /// 100 ids, each at most 256 bytes.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_request_over_the_limits_is_refused(pool: SqlitePool) -> Result {
+        let ids: Vec<String> = (0..=100).map(|i| format!("00{i:03}")).collect();
+        let too_many: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let long = "0".repeat(257);
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            for cids in [&too_many[..], &[long.as_str()][..]] {
+                let (status, body) = send(&pool, uri, cids).await?;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+            }
+        }
+        assert!(hidden(&pool).await?.is_empty());
+
+        let longest = "0".repeat(256);
+        let mut at_the_limits = too_many[..99].to_vec();
+        at_the_limits.push(&longest);
+        let (status, body) = send(&pool, "/governance/hide", &at_the_limits).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(hidden(&pool).await?.len(), 100);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_this_node_does_not_serve_is_refused(pool: SqlitePool) -> Result {
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            let data = AppState::for_test_on(None, pool.clone());
+            let (status, body) = send_to(data, uri, &["00a"]).await?;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+        }
+
+        assert!(hidden(&pool).await?.is_empty());
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert!(audit.is_empty());
+        Ok(())
     }
 }

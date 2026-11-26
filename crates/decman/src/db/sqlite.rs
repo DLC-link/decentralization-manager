@@ -12,8 +12,9 @@ use super::{
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
         DecPartyParticipantRow, DecPartyRow, DecPartyTopologyVersion, FormerDecPartyRow,
-        GovernanceAuditRow, GovernanceMediatorTimeoutRow, HandledInvitationRow, OwnerKeyRefusal,
-        PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
+        GovernanceAuditRow, GovernanceHiddenConfirmationRow, GovernanceMediatorTimeoutRow,
+        HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -399,6 +400,19 @@ impl SchemaRead for SqlitePool {
         .await?)
     }
 
+    async fn get_hidden_confirmations(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceHiddenConfirmationRow>> {
+        Ok(sqlx::query_as::<_, GovernanceHiddenConfirmationRow>(
+            "SELECT * FROM governance_hidden_confirmation WHERE party_id = ? \
+             ORDER BY contract_id",
+        )
+        .bind(party_id.to_string())
+        .fetch_all(self)
+        .await?)
+    }
+
     async fn get_governance_audit(
         &self,
         party_id: &CantonId,
@@ -700,6 +714,29 @@ impl SchemaWrite for SqlitePool {
         Ok(())
     }
 
+    async fn hide_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result<()> {
+        let mut tx = self.begin().await?;
+        Commitable::hide_confirmations(&mut tx, party_id, contract_ids, hidden_by).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn unhide_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64> {
+        let mut tx = self.begin().await?;
+        let unhidden = Commitable::unhide_confirmations(&mut tx, party_id, contract_ids).await?;
+        tx.commit().await?;
+        Ok(unhidden)
+    }
+
     async fn quarantine_acs_import(
         &self,
         party_id: &CantonId,
@@ -989,6 +1026,49 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .await?;
 
         Ok(())
+    }
+
+    async fn hide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result {
+        let now = chrono::Utc::now().timestamp();
+        for contract_id in contract_ids {
+            sqlx::query(
+                "INSERT INTO governance_hidden_confirmation \
+                 (party_id, contract_id, hidden_by, hidden_at) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(party_id, contract_id) DO NOTHING",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .bind(hidden_by)
+            .bind(now)
+            .execute(&mut **self)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn unhide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64> {
+        let mut unhidden = 0;
+        for contract_id in contract_ids {
+            unhidden += sqlx::query(
+                "DELETE FROM governance_hidden_confirmation \
+                 WHERE party_id = ? AND contract_id = ?",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .execute(&mut **self)
+            .await?
+            .rows_affected();
+        }
+        Ok(unhidden)
     }
 
     async fn insert_peer(&mut self, peer: &Peer) -> Result {
@@ -2011,6 +2091,67 @@ mod tests {
         pool.clear_mediator_timeout(&party, "00conf").await?;
 
         assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_second_hide_keeps_the_first_record(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let first = vec!["00a".to_string(), "00b".to_string()];
+        pool.hide_confirmations(&party, &first, "first@example.com")
+            .await?;
+        let before = pool.get_hidden_confirmations(&party).await?;
+
+        let again = vec!["00b".to_string(), "00c".to_string()];
+        pool.hide_confirmations(&party, &again, "second@example.com")
+            .await?;
+
+        let rows = pool.get_hidden_confirmations(&party).await?;
+        let ids: Vec<_> = rows.iter().map(|r| r.contract_id.as_str()).collect();
+        assert_eq!(ids, ["00a", "00b", "00c"]);
+        assert_eq!(rows[1].hidden_by, "first@example.com");
+        assert_eq!(rows[1].hidden_at, before[1].hidden_at);
+        assert_eq!(rows[2].hidden_by, "second@example.com");
+        assert!(rows.iter().all(|r| r.hidden_at > 0));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn unhiding_removes_only_the_named_confirmations(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let ids = vec!["00a".to_string(), "00b".to_string()];
+        pool.hide_confirmations(&party, &ids, "admin").await?;
+
+        let unhidden = pool
+            .unhide_confirmations(&party, &["00a".to_string(), "00never".to_string()])
+            .await?;
+
+        assert_eq!(unhidden, 1);
+        let rows = pool.get_hidden_confirmations(&party).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "00b");
+        assert_eq!(
+            pool.unhide_confirmations(&party, &["00a".to_string()])
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn hidden_confirmations_are_scoped_to_their_party(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let other = qid("dec", 2)?;
+        let shared = vec!["shared-cid".to_string()];
+        pool.hide_confirmations(&party, &shared, "admin").await?;
+        pool.hide_confirmations(&other, &shared, "admin").await?;
+
+        assert_eq!(pool.unhide_confirmations(&party, &shared).await?, 1);
+
+        assert!(pool.get_hidden_confirmations(&party).await?.is_empty());
+        let rows = pool.get_hidden_confirmations(&other).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].party_id, other.to_string());
         Ok(())
     }
 

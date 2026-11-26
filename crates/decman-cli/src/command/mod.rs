@@ -518,6 +518,29 @@ impl TargetArgs {
     }
 }
 
+/// Names one governance action to hide or unhide.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["proposal", "action"])))]
+pub struct HideTargetArgs {
+    /// Contract id of an on-chain proposal.
+    #[arg(long)]
+    proposal: Option<String>,
+    /// The action_hash of a self-governance action, as `governance pending`
+    /// shows it.
+    #[arg(long, value_name = "HASH")]
+    action: Option<String>,
+}
+
+impl HideTargetArgs {
+    fn target(&self) -> Result<Target> {
+        match (&self.proposal, &self.action) {
+            (Some(cid), _) => Ok(Target::Proposal(cid.clone())),
+            (_, Some(hash)) => Ok(Target::ActionHash(hash.clone())),
+            _ => bail!("name the action with --proposal or --action"),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum GovernanceCommand {
     /// The governance rules: members, threshold, and timeout.
@@ -536,6 +559,9 @@ pub enum GovernanceCommand {
         /// The next_cursor of the previous page.
         #[arg(long)]
         cursor: Option<String>,
+        /// Also list the actions hidden on this node.
+        #[arg(long)]
+        include_hidden: bool,
     },
     /// Proposals, one page at a time.
     Proposals {
@@ -616,6 +642,21 @@ pub enum GovernanceCommand {
         /// Contract id of the proposal.
         #[arg(long)]
         proposal: String,
+    },
+    /// Hide an action that cannot be archived, on this node only. Nothing is
+    /// sent to the ledger.
+    Hide {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: HideTargetArgs,
+    },
+    /// List a hidden action again.
+    Unhide {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: HideTargetArgs,
     },
 }
 
@@ -1552,11 +1593,15 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             party,
             limit,
             cursor,
+            include_hidden,
         } => {
             let party = resolve_party(client, &party)?;
             let mut query = vec![("party_id", party.id)];
             optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
             optional(&mut query, "cursor", cursor);
+            if include_hidden {
+                query.push(("include_hidden", "true".to_owned()));
+            }
             get(client, "/governance/confirmations", &query)
         }
         GovernanceCommand::Proposals {
@@ -1636,7 +1681,9 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
         GovernanceCommand::Revoke { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch(client, &party.id)?;
+            // Hiding an action only takes it off this node's list. Its
+            // confirmations stay on the ledger, so they can still be archived.
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
             let body = governance::revoke_body(&pending, &party.id, &target)?;
             post(client, "/governance/cancel", Some(&body))
         }
@@ -1645,7 +1692,7 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             confirmation,
         } => {
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
             let rules = governance::rules_contract_id(&pending)?;
             let body = governance::expire_body(&pending, &party.id, &rules, &confirmation)?;
             post(client, "/governance/expire", Some(&body))
@@ -1655,6 +1702,20 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             let pending = governance::fetch(client, &party.id)?;
             let body = governance::cancel_proposal_body(&pending, &party.id, &proposal)?;
             post(client, "/governance/cancel-proposal", Some(&body))
+        }
+        GovernanceCommand::Hide { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
+            let body = governance::hide_body(&pending, &party.id, &target)?;
+            post(client, "/governance/hide", Some(&body))
+        }
+        GovernanceCommand::Unhide { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
+            let body = governance::unhide_body(&pending, &party.id, &target)?;
+            post(client, "/governance/unhide", Some(&body))
         }
     }
 }

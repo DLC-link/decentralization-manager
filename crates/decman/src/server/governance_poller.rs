@@ -5,7 +5,11 @@
 //! reads each served decparty's queue on its own cadence, through the query the
 //! feed uses, so the gauges agree with what the feed would show.
 
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+    time::Duration,
+};
 
 use actix_web::web;
 use decman_lib::catalog::interpret;
@@ -202,6 +206,7 @@ async fn read_queue(
         None,
         // Marks do not change the counts, so the poller reads no evidence.
         &HashMap::new(),
+        &HashSet::new(),
     )
     .await?;
     anyhow::ensure!(queue.complete, "a ledger read behind the queue failed");
@@ -365,7 +370,7 @@ mod tests {
         config::{KeycloakConfig, PackageConfig, PartyCredentials},
         server::{
             ledger_paging::AcsCursor,
-            queries::mark_stuck,
+            queries::{apply_hidden, mark_stuck},
             types::{
                 ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
                 GovernanceConfirmation,
@@ -404,6 +409,7 @@ mod tests {
         };
         Ok(GovernanceAction {
             cannot_be_archived: false,
+            hidden: false,
             action_hash: "hash".to_string(),
             confirmations: expiries.iter().copied().map(confirmation).collect(),
             action: action.clone(),
@@ -429,6 +435,7 @@ mod tests {
         };
         Ok(DomainGovernanceAction {
             cannot_be_archived: false,
+            hidden: false,
             proposal_cid: "00p".to_string(),
             action_label: "GenericVote".to_string(),
             description: None,
@@ -532,6 +539,36 @@ mod tests {
         assert!(q.domain_actions[0].cannot_be_archived);
 
         assert_eq!(summarize(&q, NOW), PendingSummary::default());
+        Ok(())
+    }
+
+    /// The poller reads no hidden confirmations. Only an action that cannot be
+    /// archived can be hidden, and such an action is never pending, so hiding
+    /// cannot change the counts.
+    #[test]
+    fn a_hidden_action_is_not_pending() -> anyhow::Result<()> {
+        let mut q = queue(
+            vec![self_action(true, &[NOW])?],
+            vec![proposal(true, true, &[NOW - 1])?],
+        );
+        let timeouts = HashMap::from([(
+            "00c".to_string(),
+            HashSet::from([party("member")?.to_string()]),
+        )]);
+        mark_stuck(&mut q.actions, &mut q.domain_actions, &timeouts, NOW);
+        let without_hiding = summarize(&q, NOW);
+
+        apply_hidden(
+            &mut q.actions,
+            &mut q.domain_actions,
+            &HashSet::from(["00c".to_string()]),
+            true,
+        );
+
+        assert!(q.actions[0].hidden);
+        assert!(q.domain_actions[0].hidden);
+        assert_eq!(summarize(&q, NOW), without_hiding);
+        assert_eq!(without_hiding, PendingSummary::default());
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
-    DecPartyTopologyVersion, FormerDecPartyRow, GovernanceAuditRow, GovernanceMediatorTimeoutRow,
-    OwnerKeyRefusal,
+    DecPartyTopologyVersion, FormerDecPartyRow, GovernanceAuditRow,
+    GovernanceHiddenConfirmationRow, GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -102,6 +102,15 @@ pub trait SchemaRead {
         &self,
         party_id: &CantonId,
     ) -> Result<Vec<GovernanceMediatorTimeoutRow>>;
+
+    /// Get the confirmations an operator hid on this node, scoped to a party.
+    ///
+    /// # Errors
+    /// Returns an error if the database read fails.
+    async fn get_hidden_confirmations(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceHiddenConfirmationRow>>;
 
     /// Get paginated governance audit entries for a party, newest first
     async fn get_governance_audit(
@@ -225,6 +234,28 @@ pub trait SchemaWrite {
     /// Returns an error if the database write fails.
     async fn clear_mediator_timeout(&self, party_id: &CantonId, contract_id: &str) -> Result<()>;
 
+    /// Hide confirmations on this node. A confirmation already hidden keeps
+    /// its first record.
+    ///
+    /// # Errors
+    /// Returns an error if the database write fails. Then nothing is stored.
+    async fn hide_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result<()>;
+
+    /// Unhide hidden confirmations, and return how many were hidden.
+    ///
+    /// # Errors
+    /// Returns an error if the database write fails. Then nothing is unhidden.
+    async fn unhide_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64>;
+
     /// Record that `participant_id` holds an unknown fraction of `party_id`'s
     /// ACS. Idempotent: re-recording keeps the first reason.
     async fn quarantine_acs_import(
@@ -291,6 +322,22 @@ pub trait Commitable {
 
     /// Delete all peers
     async fn delete_all_peers(&mut self) -> Result;
+
+    /// Hide confirmations on this node. A confirmation already hidden keeps
+    /// its first record.
+    async fn hide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result;
+
+    /// Unhide hidden confirmations, and return how many were hidden.
+    async fn unhide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64>;
 
     /// Insert a single peer
     async fn insert_peer(&mut self, peer: &Peer) -> Result;

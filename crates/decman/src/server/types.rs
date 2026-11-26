@@ -28,23 +28,24 @@ pub use common::api::{
     ExternalPartyInfo, ExternalPartyUnhostPreview, ExternalPartyUnhostRequest,
     ExternalPartyUnhostResponse, FormerPartiesResponse, FormerParty, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    HandledInvitationsResponse, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
-    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
-    LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest, MessageResponse, MissingEdgeKind,
-    MissingPeerEdge, NetworkInfo, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-    OnboardingRequest, OpenMiningRoundInfo, OperatorInfo, PartyAuthStatus, PartyConfigRequest,
-    PartyConfigResponse, PendingInvitationsResponse, ProposalSummary, ProposalsPageResponse,
-    ProviderConfigurationInfo, ProviderConfigurationsResponse, ProviderServiceInfo,
-    ProviderServicesResponse, PurgeFormerPartyRequest, PurgePreview, PurgeStatus,
-    ReconnectFormerPartyRequest, RegistrarServiceInfo, RegistrarServiceRequestInfo,
-    RegistrarServiceRequestsResponse, RegistrarServicesResponse, RequestDarPayload, ResponseSource,
-    RightsStatus, RotateKeyInvitePayload, RotateKeyRequest, SuccessResponse,
-    TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
-    TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
-    TenantAddHostsPublishRequest, TenantAddHostsRequest, TenantAddHostsStageResponse,
-    TenantCallAuditResponse, TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse,
-    TenantPrepareRequest, TenantPrepareResponse, TenantThresholdExecuteRequest,
-    TenantThresholdRequest, TenantUnhostRequest, TransferFactoriesResponse, TransferFactoryInfo,
+    HandledInvitationsResponse, HideConfirmationsRequest, InstrumentInfo, InstrumentsResponse,
+    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
+    KnownMembersResponse, LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest, MessageResponse,
+    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    OnboardingMeshErrorResponse, OnboardingRequest, OpenMiningRoundInfo, OperatorInfo,
+    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse,
+    ProposalSummary, ProposalsPageResponse, ProviderConfigurationInfo,
+    ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
+    PurgeFormerPartyRequest, PurgePreview, PurgeStatus, ReconnectFormerPartyRequest,
+    RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
+    RegistrarServicesResponse, RequestDarPayload, ResponseSource, RightsStatus,
+    RotateKeyInvitePayload, RotateKeyRequest, SuccessResponse, TenantAcsBlockResponse,
+    TenantAcsImportRequest, TenantAcsImportResponse, TenantAddHostsExecuteRequest,
+    TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse, TenantAddHostsPublishRequest,
+    TenantAddHostsRequest, TenantAddHostsStageResponse, TenantCallAuditResponse,
+    TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
+    TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
+    TenantUnhostRequest, TransferFactoriesResponse, TransferFactoryInfo,
     TransferPreapprovalsResponse, UnhostAuditResponse, UserServiceInfo, UserServicesResponse,
     WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
@@ -629,6 +630,10 @@ pub struct DomainGovernanceAction {
     /// Every remaining confirmation is stuck and no live proposal needs this action.
     #[serde(default)]
     pub cannot_be_archived: bool,
+    /// An operator hid every confirmation on this node. Only a list read with
+    /// `include_hidden` returns such an action.
+    #[serde(default)]
+    pub hidden: bool,
     /// Contract ID of the proposal
     pub proposal_cid: String,
     /// Human-readable label (e.g., "SetupCcPreapproval")
@@ -807,6 +812,10 @@ pub struct GovernanceAction {
     /// Every remaining confirmation is stuck and no live proposal needs this action.
     #[serde(default)]
     pub cannot_be_archived: bool,
+    /// An operator hid every confirmation on this node. Only a list read with
+    /// `include_hidden` returns such an action.
+    #[serde(default)]
+    pub hidden: bool,
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
     /// The parsed action type
@@ -1453,6 +1462,7 @@ mod tests {
             next_cursor: None,
             actions: vec![GovernanceAction {
                 cannot_be_archived: false,
+                hidden: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
                 confirmations: vec![GovernanceConfirmation {
@@ -1470,6 +1480,7 @@ mod tests {
             }],
             domain_actions: vec![DomainGovernanceAction {
                 cannot_be_archived: false,
+                hidden: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "SetThreshold".to_owned(),
                 description: None,
@@ -1533,6 +1544,7 @@ mod tests {
             next_cursor: None,
             actions: vec![GovernanceAction {
                 cannot_be_archived: false,
+                hidden: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                 confirmations: vec![GovernanceConfirmation {
@@ -1550,6 +1562,7 @@ mod tests {
             }],
             domain_actions: vec![DomainGovernanceAction {
                 cannot_be_archived: false,
+                hidden: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "WithdrawPending".to_owned(),
                 description: None,

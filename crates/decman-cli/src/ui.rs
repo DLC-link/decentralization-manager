@@ -3545,6 +3545,7 @@ mod tests {
             threshold: 2,
             items: vec![
                 GovItem::OffChain(GovAction {
+                    action_hash: "hash".to_owned(),
                     action: serde_json::json!({
                         "type": "governance_set_threshold",
                         "new_threshold": 3,
@@ -3553,6 +3554,7 @@ mod tests {
                     executable_confirmation_cids: None,
                     confirmation_count: 1,
                     can_execute: false,
+                    cannot_be_archived: false,
                 }),
                 GovItem::Domain(DomainGovAction {
                     proposal_cid: "00prop".to_owned(),
@@ -3563,6 +3565,7 @@ mod tests {
                     confirmation_count: 2,
                     can_execute: true,
                     orphaned: false,
+                    cannot_be_archived: false,
                 }),
             ],
             selected: 0,

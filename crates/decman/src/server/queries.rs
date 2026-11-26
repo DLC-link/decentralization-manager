@@ -534,6 +534,8 @@ where
 /// `rules` is the live rules contract, or `None` when it could not be read.
 /// `timeouts` is this node's expire evidence. A first batch uses it to find
 /// the orphans that cannot be archived when the proposals span several pages.
+/// `left_out` holds the hidden confirmations that the caller leaves out. That
+/// search skips an orphan whose confirmations are all in it.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
@@ -545,6 +547,7 @@ pub async fn get_governance_confirmations(
     limit: usize,
     cursor: Option<AcsCursor>,
     timeouts: &ExpireTimeouts,
+    left_out: &HashSet<String>,
 ) -> Result<GovernanceQueue> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
@@ -620,7 +623,8 @@ pub async fn get_governance_confirmations(
     // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
     // of FETCH_CHUNK ids, and then leaves the orphans out. A scan that fails
     // leaves them out too, so the batch is then incomplete. An orphan is
-    // marked on each party's newest confirmation, as the listed action is.
+    // marked on each party's newest confirmation, as the listed action is. A
+    // hidden orphan that the caller leaves out anyway starts no scan.
     let mut gone = HashSet::new();
     let mut orphan_scan_ok = true;
     if first_page
@@ -649,6 +653,7 @@ pub async fn get_governance_confirmations(
                             now_seconds,
                         )
                     })
+                    && !newest.iter().all(|c| left_out.contains(&c.contract_id))
             })
             .map(|(cid, _)| cid)
             .collect();
@@ -790,6 +795,42 @@ pub(crate) fn mark_stuck(
     domain_actions.retain(|action| !action.orphaned || action.cannot_be_archived);
 }
 
+/// Apply this node's hidden confirmations after [`mark_stuck`].
+///
+/// An action is hidden only when it could not be archived at the last expire
+/// attempt and every one of its confirmations is in `hidden`. A new
+/// confirmation therefore shows it again. That evidence does not age: an
+/// action whose confirmer's participant came back stays hidden until someone
+/// runs expire again. A hidden action leaves the lists, unless `include`
+/// keeps it marked.
+pub(crate) fn apply_hidden(
+    actions: &mut Vec<GovernanceAction>,
+    domain_actions: &mut Vec<DomainGovernanceAction>,
+    hidden: &HashSet<String>,
+    include: bool,
+) {
+    for action in actions.iter_mut() {
+        action.hidden = action.cannot_be_archived
+            && !action.confirmations.is_empty()
+            && action
+                .confirmations
+                .iter()
+                .all(|c| hidden.contains(&c.contract_id));
+    }
+    for action in domain_actions.iter_mut() {
+        action.hidden = action.cannot_be_archived
+            && !action.confirmations.is_empty()
+            && action
+                .confirmations
+                .iter()
+                .all(|c| hidden.contains(&c.contract_id));
+    }
+    if !include {
+        actions.retain(|action| !action.hidden);
+        domain_actions.retain(|action| !action.hidden);
+    }
+}
+
 /// Map an assembled domain proposal onto the wire DTO.
 ///
 /// The payload is rendered from the create arguments the proposal read already
@@ -802,6 +843,7 @@ fn domain_action_dto(
     let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
     DomainGovernanceAction {
         cannot_be_archived: false,
+        hidden: false,
         proposal_cid: action.proposal_cid,
         action_label: action.action_label,
         description: action.description,
@@ -888,6 +930,7 @@ fn assemble_self_actions(
                 .unwrap_or(0);
             GovernanceAction {
                 cannot_be_archived: false,
+                hidden: false,
                 action_hash,
                 action,
                 confirmations: unique_confirmations
@@ -4845,6 +4888,7 @@ mod stuck_tests {
             can_execute: false,
             last_confirmation_at: 1,
             cannot_be_archived: false,
+            hidden: false,
         }
     }
 
@@ -4877,6 +4921,7 @@ mod stuck_tests {
             proposal_template_id: None,
             proposal_payload: None,
             cannot_be_archived: false,
+            hidden: false,
         }
     }
 
@@ -5031,5 +5076,88 @@ mod stuck_tests {
         assert_eq!(domains[0].confirmations[0].stuck, None);
         assert!(!actions[0].cannot_be_archived);
         assert!(!domains[0].cannot_be_archived);
+    }
+
+    /// Actions after `mark_stuck` with a timeout naming the confirmer of
+    /// every confirmation, then `apply_hidden`.
+    fn hide(
+        mut actions: Vec<GovernanceAction>,
+        mut domains: Vec<DomainGovernanceAction>,
+        hidden: &[&str],
+        include: bool,
+    ) -> (Vec<GovernanceAction>, Vec<DomainGovernanceAction>) {
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0", "c1"], &member()),
+            NOW,
+        );
+        let hidden = hidden.iter().map(|id| id.to_string()).collect();
+        apply_hidden(&mut actions, &mut domains, &hidden, include);
+        (actions, domains)
+    }
+
+    #[test]
+    fn a_hidden_action_leaves_the_default_list() {
+        let (actions, domains) = hide(
+            vec![self_action(&[NOW, NOW - 1])],
+            vec![domain_action(true, &[NOW - 1])],
+            &["c0", "c1"],
+            false,
+        );
+
+        assert!(actions.is_empty());
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn include_hidden_returns_the_action_marked() {
+        let (actions, domains) = hide(
+            vec![self_action(&[NOW, NOW - 1]), self_action(&[NOW])],
+            vec![domain_action(true, &[NOW - 1])],
+            &["c0", "c1"],
+            true,
+        );
+
+        assert_eq!(actions.len(), 2);
+        assert!(actions[0].hidden);
+        assert!(actions[1].hidden);
+        assert_eq!(domains.len(), 1);
+        assert!(domains[0].hidden);
+    }
+
+    #[test]
+    fn a_new_confirmation_shows_a_hidden_action_again() {
+        // c0 was hidden. c1 arrived later and cannot be archived either.
+        let (actions, domains) = hide(
+            vec![self_action(&[NOW, NOW - 1])],
+            vec![domain_action(true, &[NOW, NOW - 1])],
+            &["c0"],
+            false,
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].cannot_be_archived);
+        assert!(!actions[0].hidden);
+        assert_eq!(domains.len(), 1);
+        assert!(domains[0].cannot_be_archived);
+        assert!(!domains[0].hidden);
+    }
+
+    #[test]
+    fn hiding_never_removes_an_action_that_can_be_archived() {
+        let (actions, domains) = hide(
+            vec![self_action(&[NOW + 60]), self_action(&[0])],
+            // A live proposal: its proposer can still cancel it.
+            vec![domain_action(false, &[NOW - 1])],
+            &["c0"],
+            false,
+        );
+
+        assert_eq!(actions.len(), 2);
+        assert!(actions.iter().all(|a| !a.cannot_be_archived && !a.hidden));
+        assert_eq!(domains.len(), 1);
+        assert!(!domains[0].cannot_be_archived);
+        assert!(!domains[0].hidden);
     }
 }

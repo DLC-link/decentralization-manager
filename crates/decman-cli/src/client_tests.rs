@@ -704,6 +704,262 @@ fn expire_prints_the_unresponsive_party() {
     assert!(failure.to_string().contains(&error), "{failure}");
 }
 
+/// An operator can still expire or revoke a confirmation of an action hidden
+/// on this node: hiding takes it off the list, not off the ledger.
+#[test]
+fn expire_and_revoke_reach_a_hidden_action() {
+    for (command, flag, route, body) in [
+        (
+            "expire",
+            "--confirmation",
+            "/governance/expire",
+            json!({
+                "party_id": ALPHA,
+                "rules_contract_id": "rules-1",
+                "confirmation_cid": "c-mine",
+                "governance_type": "core_domain",
+            }),
+        ),
+        (
+            "revoke",
+            "--proposal",
+            "/governance/cancel",
+            json!({
+                "party_id": ALPHA,
+                "confirmation_cid": "c-mine",
+                "governance_type": "core_domain",
+            }),
+        ),
+    ] {
+        // Arrange
+        let fake = Fake::start();
+        fake.token_grant("password", "a-1", 1);
+        fake.mount(
+            Mock::given(method("GET"))
+                .and(path("/decentralized-parties"))
+                .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+                .expect(1),
+        );
+        fake.mount(
+            Mock::given(method("GET"))
+                .and(path("/governance/confirmations"))
+                .and(query_param("include_hidden", "true"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "threshold": 2,
+                    "rules_contract_id": "rules-1",
+                    "member_party_id": "mine::1220",
+                    "actions": [],
+                    "domain_actions": [{
+                        "proposal_cid": "p-gone",
+                        "action_label": "GenericVote",
+                        "confirmations": [
+                            { "contract_id": "c-mine", "confirming_party": "mine::1220", "expires_at": 1 },
+                        ],
+                        "orphaned": true,
+                        "cannot_be_archived": true,
+                        "hidden": true,
+                    }],
+                })))
+                .expect(1),
+        );
+        fake.mount(
+            Mock::given(method("POST"))
+                .and(path(route))
+                .and(body_json(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "message": "ok" })))
+                .expect(1),
+        );
+        let target = if command == "expire" {
+            "c-mine"
+        } else {
+            "p-gone"
+        };
+
+        // Act
+        let outcome = run_command(
+            &fake,
+            parse(&["governance", command, "--party", "alpha", flag, target]),
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(outcome.value["message"], "ok", "{command}");
+    }
+}
+
+#[test]
+fn pending_passes_include_hidden() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("party_id", ALPHA))
+            .and(query_param("include_hidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "actions": [] })))
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "pending",
+            "--party",
+            "alpha",
+            "--include-hidden",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "actions": [] }));
+}
+
+#[test]
+fn hide_reads_hidden_actions_and_sends_every_confirmation() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("include_hidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [{
+                    "action_hash": "h-stuck",
+                    "action": { "type": "governance_set_threshold", "new_threshold": 2 },
+                    "confirmations": [
+                        { "contract_id": "c-1", "confirming_party": "gone::1220", "expires_at": 1 },
+                        { "contract_id": "c-2", "confirming_party": "gone::1220", "expires_at": 1 },
+                    ],
+                    "cannot_be_archived": true,
+                }],
+                "domain_actions": [],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/hide"))
+            .and(body_json(json!({
+                "party_id": ALPHA,
+                "confirmation_cids": ["c-1", "c-2"],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "message": "Confirmations hidden on this node: 2." })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "hide",
+            "--party",
+            "alpha",
+            "--action",
+            "h-stuck",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        outcome.value["message"],
+        "Confirmations hidden on this node: 2."
+    );
+}
+
+/// A hidden action is missing from the default list, so unhide must read
+/// the list with the hidden actions to find it.
+#[test]
+fn unhide_finds_a_hidden_action_and_sends_every_confirmation() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("include_hidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [],
+                "domain_actions": [{
+                    "proposal_cid": "p-gone",
+                    "action_label": "GenericVote",
+                    "confirmations": [
+                        { "contract_id": "c-1", "confirming_party": "gone::1220", "expires_at": 1 },
+                        { "contract_id": "c-2", "confirming_party": "gone::1220", "expires_at": 1 },
+                    ],
+                    "orphaned": true,
+                    "cannot_be_archived": true,
+                    "hidden": true,
+                }],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/unhide"))
+            .and(body_json(json!({
+                "party_id": ALPHA,
+                "confirmation_cids": ["c-1", "c-2"],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "message": "Confirmations unhidden on this node: 2." })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "unhide",
+            "--party",
+            "alpha",
+            "--proposal",
+            "p-gone",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        outcome.value["message"],
+        "Confirmations unhidden on this node: 2."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn grant_rights_takes_the_admin_client_from_the_profile() {
