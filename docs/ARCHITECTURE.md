@@ -719,6 +719,31 @@ contracts to them. See
 [Decentralizing an existing party](DECENTRALIZING_AN_EXISTING_PARTY.md) and
 [crates/decman-wallet/README.md](../crates/decman-wallet/README.md).
 
+### Covalidator Approval for a Decentralized Party (Tenant API)
+
+A dApp creates a decentralized party whose owners hold their keys off-node. The
+owners' participants submit the onboarding topology. A covalidator hosts the
+party but is not an owner. Its authorization of the pending
+`PartyToParticipant` proposal is still missing.
+
+**Steps:**
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | submit | Owners' participants | Submit the onboarding topology. The `PartyToParticipant` stays a proposal until every host signs |
+| 2 | approve | dApp -> each covalidator | `POST /v0/tenant/decentralized-party/approve-hosting` with the party id and the proposal's hash |
+| 3 | sign | Covalidator | Reads the proposal from its own synchronizer store, checks it, signs it with its topology key, and submits it |
+| 4 | poll | dApp | `GET /v0/tenant/{party}/status` on each covalidator until it reports the party hosted |
+
+The covalidator signs nothing the caller sends. It applies the onboarding rules
+of the single-key route, with one change. The party may have any number of
+signing keys, at a threshold they can meet. Its namespace must also be a
+decentralized namespace in force.
+
+**Authentication:** a dApp key from `DECPM_DAPP_API_KEYS` opens only steps 2 and
+4. Those two routes accept any origin, without credentials. See
+[Co-validating a decentralized party](COVALIDATING_A_DECENTRALIZED_PARTY.md).
+
 ## Governance System
 
 The governance system provides multi-party approval workflows built on Daml smart contracts. It uses a **modular, interface-based architecture** where a single `GovernanceRules` contract handles consensus logic (threshold validation, confirmation lifecycle) while domain-specific actions are defined as separate templates implementing the `GovernableAction` interface.
