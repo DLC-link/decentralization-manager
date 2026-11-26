@@ -3460,8 +3460,122 @@ mod approve_hosting_tests {
         let added = host.fake.add_requests();
         assert_eq!(added.len(), 1, "{added:?}");
         assert_eq!(added[0].transactions, vec![pending]);
+        // Both calls go to the synchronizer store that holds the proposal,
+        // and neither forces past Canton's own checks.
+        let store = Some(crate::workflow::topology::synchronizer_store_id(
+            &crate::utils::get_synchronizer_id(&host.state.config).await?,
+        ));
+        assert_eq!(signed[0].store, store);
+        assert_eq!(added[0].store, store);
+        assert!(signed[0].force_flags.is_empty(), "{signed:?}");
+        assert!(added[0].force_changes.is_empty(), "{added:?}");
         let row = only_row(&db, StatusCode::ACCEPTED).await?;
         assert_eq!(row.error, None);
+        Ok(())
+    }
+
+    /// A dApp approves with its key, then polls the status route with the
+    /// same key. When this host's signature is the last one the mapping needs,
+    /// the party is in force at once, and both answers say `completed`.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_last_host_to_sign_answers_completed(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        host.fake.sign_last();
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body, json!({ "status": "completed", "party_id": party() }));
+        assert_eq!(host.fake.add_requests().len(), 1);
+        only_row(&db, StatusCode::ACCEPTED).await?;
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_status),
+        )
+        .await;
+        let poll = actix_test::TestRequest::get()
+            .uri(&format!("/v0/tenant/{}/status", party()))
+            .insert_header(("Authorization", "Bearer dapp-key"))
+            .to_request();
+        let response = actix_test::call_service(&app, poll).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let polled: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(polled["status"], json!("completed"), "{polled}");
+        Ok(())
+    }
+
+    /// Several proposals can wait under one namespace. The host signs only
+    /// the one whose hash the caller names, even when another proposal for
+    /// the same party, naming this host, comes first in the store.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signs_only_the_proposal_whose_hash_the_caller_names(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let mut earlier = host.onboarding();
+        if let Some(keys) = earlier.party_signing_keys.as_mut() {
+            keys.threshold = 1;
+        }
+        let decoy = proposal(earlier);
+        let named = proposal(host.onboarding());
+        assert_ne!(hash_of(&decoy), hash_of(&named));
+        host.fake.propose(decoy);
+        host.fake.propose(named.clone());
+
+        let (status, body) = host.call("key", &hash_of(&named)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let signed = host.fake.sign_requests();
+        assert_eq!(signed.len(), 1, "{signed:?}");
+        assert_eq!(signed[0].transactions, vec![named.clone()]);
+        let added = host.fake.add_requests();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].transactions, vec![named]);
+        Ok(())
+    }
+
+    /// The node refuses when it holds a key for any owner of the namespace,
+    /// not only the first one listed.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_key_anywhere_in_the_owner_list_is_refused(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let owner_key = VaultKey::software("dapp-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![owner_key.clone()]).await?;
+        host.fake.publish_namespace(
+            1,
+            DecentralizedNamespaceDefinition {
+                decentralized_namespace: namespace(),
+                threshold: 2,
+                owners: vec![
+                    format!("1220{}", "e1".repeat(32)),
+                    format!("1220{}", "e2".repeat(32)),
+                    owner_key.fingerprint().to_string(),
+                ],
+            },
+        );
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(owner_key.fingerprint().as_str())),
+            "{body}"
+        );
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        only_row(&db, StatusCode::BAD_REQUEST).await?;
         Ok(())
     }
 

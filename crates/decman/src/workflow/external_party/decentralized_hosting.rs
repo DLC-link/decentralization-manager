@@ -621,6 +621,22 @@ mod tests {
         assert!(reason.contains("missing Protocol"), "{reason}");
     }
 
+    /// Protocol is the only usage a decentralized party's key must declare.
+    /// The owners' root keys authorize the party's topology, so its signing
+    /// keys need no Namespace usage, unlike a single-key party's one key.
+    #[test]
+    fn accepts_signing_keys_that_declare_protocol_usage_alone() {
+        let mut protocol_only = mapping(3, 2);
+        if let Some(keys) = protocol_only.party_signing_keys.as_mut() {
+            for key in &mut keys.keys {
+                key.usage = vec![SigningKeyUsage::Protocol as i32];
+            }
+        }
+        if let Err(e) = check(&p2p(protocol_only)) {
+            panic!("keys with Protocol usage alone must pass: {e}");
+        }
+    }
+
     #[test]
     fn refuses_a_signing_threshold_out_of_range() {
         for threshold in [0, 4] {

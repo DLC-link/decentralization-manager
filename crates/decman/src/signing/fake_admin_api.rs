@@ -19,7 +19,8 @@
 //! A test can also put proposals in the store. A read that asks for proposals
 //! lists those instead of the head state. The write service records each
 //! `SignTransactions` and `AddTransactions` request, so a test can show what
-//! DecMan signed and submitted.
+//! DecMan signed and submitted. A test can also make this participant the last
+//! authorizer, so that an added `PartyToParticipant` goes in force.
 
 use std::{
     convert::Infallible,
@@ -204,6 +205,8 @@ struct Vault {
     authorized: Vec<AuthorizeRequest>,
     sign_requests: Vec<SignTransactionsRequest>,
     add_requests: Vec<AddTransactionsRequest>,
+    /// This participant's signature is the last one a proposal needs.
+    last_authorizer: bool,
 }
 
 /// The synchronizer's head state: each mapping in force, with its serial.
@@ -289,6 +292,28 @@ fn wants_proposals(query: Option<&BaseQuery>) -> bool {
 }
 
 impl Vault {
+    fn add_transactions(&mut self, request: AddTransactionsRequest) {
+        if self.last_authorizer {
+            for added in &request.transactions {
+                let Ok(transaction) = topology_version::decode_transaction(&added.transaction)
+                else {
+                    continue;
+                };
+                if let Some(topology_mapping::Mapping::PartyToParticipant(p2p)) =
+                    transaction.mapping.and_then(|m| m.mapping)
+                {
+                    self.topology
+                        .proposals
+                        .retain(|pending| pending.transaction != added.transaction);
+                    self.topology
+                        .p2p
+                        .push((i32::try_from(transaction.serial).unwrap_or(i32::MAX), p2p));
+                }
+            }
+        }
+        self.add_requests.push(request);
+    }
+
     fn list_my_keys(&self, request: ListMyKeysRequest) -> ListMyKeysResponse {
         let filters = request.filters.unwrap_or_default();
         ListMyKeysResponse {
@@ -573,6 +598,7 @@ impl FakeAdminApi {
             authorized: Vec::new(),
             sign_requests: Vec::new(),
             add_requests: Vec::new(),
+            last_authorizer: false,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -638,6 +664,14 @@ impl FakeAdminApi {
     /// Put `proposal` in the store as a pending proposal.
     pub fn propose(&self, proposal: SignedTopologyTransaction) {
         lock(&self.vault).topology.proposals.push(proposal);
+    }
+
+    /// Make this participant the last authorizer every proposal needs. A
+    /// `PartyToParticipant` that `AddTransactions` receives then goes in force
+    /// at its serial and leaves the pending proposals, as Canton does once the
+    /// last required signature arrives.
+    pub fn sign_last(&self) {
+        lock(&self.vault).last_authorizer = true;
     }
 
     /// Each `SignTransactions` request DecMan sent, in order.
@@ -803,7 +837,7 @@ async fn dispatch(vault: Shared, request: http::Request<Body>) -> http::Response
         }
         Some("AddTransactions") => {
             unary(request, move |r: AddTransactionsRequest| {
-                lock(&vault).add_requests.push(r);
+                lock(&vault).add_transactions(r);
                 Ok(AddTransactionsResponse {})
             })
             .await
