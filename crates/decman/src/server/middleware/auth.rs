@@ -282,6 +282,12 @@ fn is_dapp_call(method: &Method, path: &str) -> bool {
     }
 }
 
+/// Whether `path` is one of the dApp routes, whatever the method. CORS needs
+/// this, because a preflight request uses `OPTIONS`.
+pub fn is_dapp_path(path: &str) -> bool {
+    path == APPROVE_HOSTING_PATH || is_status_path(path)
+}
+
 /// `/v0/tenant/{party}/status`, with a party.
 fn is_status_path(path: &str) -> bool {
     path.strip_prefix(TENANT_PREFIX)
