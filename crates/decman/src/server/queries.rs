@@ -653,9 +653,7 @@ pub async fn get_governance_confirmations(
                             now_seconds,
                         )
                     })
-                    && !confirmations
-                        .iter()
-                        .all(|c| left_out.contains(&c.contract_id))
+                    && !newest.iter().all(|c| left_out.contains(&c.contract_id))
             })
             .map(|(cid, _)| cid)
             .collect();

@@ -5593,6 +5593,47 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// A hide records the confirmations the feed lists: each party's newest
+    /// one. An older confirmation from the same party stays unrecorded. The
+    /// orphan is still hidden, so it must still start no scan.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_orphan_with_an_older_confirmation_starts_no_scan(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let mut older = domain_confirmation("00dom-older", "00gone", &member, expired - 60);
+        older.created_at = Some(prost_types::Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let mut newer = domain_confirmation("00dom-newer", "00gone", &member, expired);
+        newer.created_at = Some(prost_types::Timestamp {
+            seconds: 200,
+            nanos: 0,
+        });
+        pool.record_mediator_timeout(&party, "00dom-newer", &[member.to_string()])
+            .await?;
+        pool.hide_confirmations(&party, &["00dom-newer".to_string()], "admin")
+            .await?;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member]), older, newer]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            ..AcsLedger::default()
+        };
+
+        let body = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+        // The first page reads the proposals once. A scan reads them again.
+        assert_eq!(ledger.proposal_reads.load(Ordering::SeqCst), 1);
+        assert!(!lists(&body["domain_actions"], "00dom-newer"), "{body}");
+        Ok(())
+    }
+
     /// Issue #615 asks that an operator can hide an action that cannot be
     /// archived, on this node. The feed then leaves it out, `include_hidden`
     /// brings it back marked, and an unhide or a new confirmation lists it
