@@ -59,7 +59,7 @@ use crate::{
         AppState,
         audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
-        ledger_rejection::{LedgerConnectionFailed, submission_failure},
+        ledger_rejection::{LedgerConnectionFailed, ReadTimedOut, submission_failure},
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
@@ -762,15 +762,23 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
 // Spawned Writes
 // ============================================================================
 
-/// How long a governance write waits for the ledger, across all its
-/// submissions. Without a deadline, a write whose caller hung up waits until
+/// How long a governance write waits for the ledger, across the reads before
+/// it and all its submissions. Without a deadline, a write whose caller hung up waits until
 /// Canton stops tracking the command. The deployment guide asks a proxy to
 /// wait longer than this, so DecMan's own answer reaches the caller.
 const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
 
-/// When a write whose first submission starts now stops waiting.
+/// When a write that starts now stops waiting.
 fn write_deadline() -> Instant {
     Instant::now() + SUBMISSION_DEADLINE
+}
+
+/// `read` bounded by what is left of the write's `deadline`. A read that does
+/// not answer in time ends the write before it sends anything.
+async fn read_before_write<T>(deadline: Instant, read: impl Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read)
+        .await
+        .map_err(|_| ReadTimedOut.into())
 }
 
 /// A Ledger API request as `token` that waits for the ledger until
@@ -1507,10 +1515,17 @@ pub async fn confirm_action(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_confirm_action(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to submit confirmation", e)
         })
@@ -1584,6 +1599,7 @@ pub async fn execute_action(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
         let result = execute_confirmed_action(
             &data.config,
@@ -1592,6 +1608,7 @@ pub async fn execute_action(
             &token,
             &member_party_id,
             &packages(),
+            deadline,
         )
         .await;
         Submitted::of(result, execute_failure)
@@ -1673,10 +1690,17 @@ pub async fn expire_confirmation(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_expire_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to expire confirmation", e)
         })
@@ -1732,10 +1756,17 @@ pub async fn cancel_confirmation(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_cancel_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to cancel confirmation", e)
         })
@@ -1797,10 +1828,17 @@ pub async fn cancel_proposal(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_cancel_proposal(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to cancel proposal", e)
         })
@@ -2047,6 +2085,7 @@ async fn execute_confirm_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     let command_id = uuid::Uuid::new_v4().to_string();
     let commands = match request.governance_type {
@@ -2055,14 +2094,17 @@ async fn execute_confirm_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2078,14 +2120,17 @@ async fn execute_confirm_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain confirm")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2110,7 +2155,7 @@ async fn execute_confirm_action(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2125,6 +2170,7 @@ async fn execute_confirmed_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // The executor's submission must carry the contracts the proposal's
     // execute step reads but no member can see. `AcceptTransferProposal` needs
@@ -2137,13 +2183,16 @@ async fn execute_confirmed_action(
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
     let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
-        match fetch_proposal_created_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            proposal_cid,
+        match read_before_write(
+            deadline,
+            fetch_proposal_created_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                proposal_cid,
+            ),
         )
-        .await
+        .await?
         {
             Ok(event) => proposal_event = event,
             // Don't hard-fail on ledger hiccups here; the submission below
@@ -2154,13 +2203,16 @@ async fn execute_confirmed_action(
     if let (Some(proposal_cid), Some(created)) =
         (request.proposal_cid.as_deref(), proposal_event.as_ref())
     {
-        match maybe_fetch_for_proposal_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            created,
+        match read_before_write(
+            deadline,
+            maybe_fetch_for_proposal_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                created,
+            ),
         )
-        .await
+        .await?
         {
             Ok(Some(ctx)) => match to_proto_disclosed_contracts(&ctx.disclosed_contracts) {
                 Ok(dcs) => registry_disclosed = dcs,
@@ -2196,8 +2248,8 @@ async fn execute_confirmed_action(
                     value::Sum::ContractId(cid) => Some(cid.as_str()),
                     _ => None,
                 });
-            let current = fetch_amulet_rules(http_client, config)
-                .await
+            let current = read_before_write(deadline, fetch_amulet_rules(http_client, config))
+                .await?
                 .context("Failed to fetch AmuletRules from the DSO API")?;
             registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
         }
@@ -2213,8 +2265,13 @@ async fn execute_confirmed_action(
                 .iter()
                 .map(|dc| dc.contract_id.as_str())
                 .collect();
-            registry_disclosed
-                .extend(paid_accept_disclosures(http_client, config, &pins, &requested).await?);
+            registry_disclosed.extend(
+                read_before_write(
+                    deadline,
+                    paid_accept_disclosures(http_client, config, &pins, &requested),
+                )
+                .await??,
+            );
         }
     }
 
@@ -2251,14 +2308,17 @@ async fn execute_confirmed_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2276,14 +2336,17 @@ async fn execute_confirmed_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain execute")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2310,7 +2373,7 @@ async fn execute_confirmed_action(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2475,6 +2538,7 @@ async fn execute_expire_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // All three flows take the same argument shape ({ member,
     // staleConfirmationCid }); only the template and the choice differ.
@@ -2485,14 +2549,17 @@ async fn execute_expire_confirmation(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_self_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2508,14 +2575,17 @@ async fn execute_expire_confirmation(
             // `GovernanceConfirmation` template (domain action confirmations)
             // rather than `GovernanceSelfConfirmation`.
             let mut rules = governance_rules_template(packages)?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_domain_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2540,7 +2610,7 @@ async fn execute_expire_confirmation(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2554,6 +2624,7 @@ async fn execute_cancel_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // Every `_Cancel` choice is controller=confirmer and takes no arguments;
     // only the confirmation template differs.
@@ -2564,14 +2635,17 @@ async fn execute_cancel_confirmation(
             // The confirmation contract is created by the rules contract's
             // choice, so it shares the rules contract's (possibly out-of-date)
             // package — exercise it under its actual package ref.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_self_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2584,14 +2658,17 @@ async fn execute_cancel_confirmation(
             // Domain confirmations live in their own template
             // `GovernanceConfirmation` (module `Governance.Confirmation`).
             let mut confirmation = domain_confirmation_template(packages)?;
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_domain_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2615,7 +2692,7 @@ async fn execute_cancel_confirmation(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2635,6 +2712,7 @@ async fn execute_cancel_proposal(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // `GovernableAction_ProposerCancel` is declared on the interface rather
     // than on any one template, so the exercise carries the `GovernableAction`
@@ -2649,14 +2727,17 @@ async fn execute_cancel_proposal(
             let mut confirmation = domain_confirmation_template(packages)?;
             // The confirmation is created by the rules contract's choice, so it
             // shares that contract's possibly out-of-date package.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             Some(confirmation)
         }
         None => None,
@@ -2687,7 +2768,7 @@ async fn execute_cancel_proposal(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -4289,6 +4370,124 @@ mod mediator_timeout_tests {
             "{error}"
         );
         assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
+        Ok(())
+    }
+
+    /// Confirm, execute, expire and both cancels read a contract's package
+    /// before they submit. That read shares the write's deadline, so a ledger
+    /// that never answers it ends the write at its deadline, before anything
+    /// is sent.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_stops_at_its_deadline_during_a_read_before_it(pool: SqlitePool) -> Result {
+        let ledger = RejectingLedger::new();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger.clone())
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let config = &data.config;
+        let package_config = packages();
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+        let token = "any-token";
+
+        for (event, _, context, mut body) in writes() {
+            if matches!(event, AuditEvent::Propose) {
+                continue;
+            }
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let writing = async {
+                match event {
+                    AuditEvent::Confirm => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirm_action(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Execute => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirmed_action(
+                            config,
+                            &data.http_client,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Expire => {
+                        let request = serde_json::from_value(body)?;
+                        execute_expire_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Cancel => {
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::CancelProposal => {
+                        // Without its own confirmation, a cancel reads nothing first.
+                        body["confirmation_cid"] = serde_json::json!("00c0ffee");
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_proposal(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    other => anyhow::bail!("{other:?} is not a write"),
+                }
+            };
+            let written = tokio::time::timeout(Duration::from_secs(5), writing)
+                .await
+                .with_context(|| format!("{event:?} outlived its deadline"))?;
+
+            let error = written
+                .err()
+                .with_context(|| format!("{event:?} succeeded"))?;
+            let (status, message) = submission_failure(context, &error);
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}: {message}");
+            assert_eq!(
+                message,
+                format!(
+                    "{context}: a read that the write needs did not answer in time. DecMan sent \
+                     nothing to the ledger, so you can retry."
+                )
+            );
+        }
+        assert!(
+            ledger.deadline_millis()?.is_empty(),
+            "a write reached the ledger"
+        );
         Ok(())
     }
 
