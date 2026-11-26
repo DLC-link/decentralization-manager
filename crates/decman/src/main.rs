@@ -43,9 +43,9 @@ fn apply_tls_overrides(tls: &mut CantonTlsConfig, overrides: TlsOverrides<'_>) {
     }
 }
 
-/// Split `DECPM_TENANT_API_KEYS` into keys, in the order configured. A repeat
-/// keeps its first position, so the index an audit row records for a key
-/// always names the same key.
+/// Split `DECPM_TENANT_API_KEYS` or `DECPM_DAPP_API_KEYS` into keys, in the
+/// order configured. A repeat keeps its first position, so the index an audit
+/// row records for a key always names the same key.
 fn parse_tenant_api_keys(raw: &str) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for key in raw.split(',').map(str::trim).filter(|k| !k.is_empty()) {
@@ -201,6 +201,7 @@ async fn run() -> Result {
             canton_hmac_audience,
             canton_hmac_subject,
             tenant_api_keys,
+            dapp_api_keys,
             tenant_rate_limit_per_minute,
             validator_operator_party,
             key_store_key_file,
@@ -358,6 +359,10 @@ async fn run() -> Result {
             }
 
             config.tenant_api_keys = tenant_api_keys
+                .as_deref()
+                .map(parse_tenant_api_keys)
+                .unwrap_or_default();
+            config.dapp_api_keys = dapp_api_keys
                 .as_deref()
                 .map(parse_tenant_api_keys)
                 .unwrap_or_default();

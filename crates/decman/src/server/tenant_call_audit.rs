@@ -71,8 +71,9 @@ impl TenantEndpoint {
 
 /// What a new row holds.
 pub struct NewTenantCall<'a> {
-    /// The index of the key in `DECPM_TENANT_API_KEYS`. `None` in insecure
-    /// mode, where no key is checked.
+    /// The index of the key in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_DAPP_API_KEYS` for a dApp key. `None` in insecure mode, where no
+    /// key is checked.
     pub key_index: Option<usize>,
     /// The key's id, which survives a reordered key list. `None` in insecure
     /// mode.

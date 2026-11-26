@@ -11,6 +11,10 @@
 //! per-minute budget before the handler reads the body, so a refused call
 //! costs no body parsing. It attaches the matched key as a [`TenantCaller`].
 //!
+//! A decentralized-party dApp presents a key from a second list,
+//! `DECPM_DAPP_API_KEYS`. A browser holds that key, so it opens only the two
+//! routes the dApp calls. Every other tenant route answers it with a 403.
+//!
 //! Everything else requires a valid `Authorization: Bearer <token>` that the
 //! configured `TokenValidator` accepts. The resolved `Principal` is attached
 //! to the request extensions for handlers to consume.
@@ -193,13 +197,21 @@ pub fn require_admin(
 
 const TENANT_PREFIX: &str = "/v0/tenant/";
 
+/// The route a decentralized-party dApp calls to have this node approve
+/// hosting.
+const APPROVE_HOSTING_PATH: &str = "/v0/tenant/decentralized-party/approve-hosting";
+
 /// A tenant API key that matched, named without the key itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantKey {
-    /// The key's position in `DECPM_TENANT_API_KEYS`.
+    /// The key's position in `DECPM_TENANT_API_KEYS`, or in
+    /// `DECPM_DAPP_API_KEYS` for a dApp key.
     pub index: usize,
     /// See [`tenant_key_id`].
     pub id: String,
+    /// The key is one of `DECPM_DAPP_API_KEYS`, so it opens only the dApp
+    /// routes.
+    pub dapp: bool,
 }
 
 /// The tenant key that the middleware accepted for a `/v0/tenant/*` request.
@@ -226,8 +238,9 @@ pub fn tenant_key_id(key: &str) -> String {
 /// JWT path relaxes under `--insecure`.
 ///
 /// # Errors
-/// A 401 when the bearer is missing or is not a configured key, and a 429
-/// with `Retry-After` when the key has spent its budget.
+/// A 401 when the bearer is missing or is not a configured key, a 403 when a
+/// dApp key calls a route other than the dApp routes, and a 429 with
+/// `Retry-After` when the key has spent its budget.
 #[allow(clippy::result_large_err)]
 fn admit_tenant_call(
     method: &Method,
@@ -236,10 +249,44 @@ fn admit_tenant_call(
     state: &AppState,
 ) -> Result<TenantCaller, HttpResponse> {
     let key = match_tenant_api_key(headers, state)?;
+    if let Some(key) = key.as_ref().filter(|key| key.dapp)
+        && !is_dapp_call(method, path)
+    {
+        tracing::warn!(
+            key_index = key.index,
+            key_id = %key.id,
+            %method,
+            path,
+            "refused a dApp API key outside the dApp routes"
+        );
+        return Err(HttpResponse::Forbidden().json(ErrorResponse {
+            error: format!(
+                "a dApp API key may call only POST {APPROVE_HOSTING_PATH} and \
+                 GET {TENANT_PREFIX}{{party}}/status"
+            ),
+        }));
+    }
     if !is_acs_relay_call(method, path) {
         charge_tenant_key(state, key.as_ref(), path)?;
     }
     Ok(TenantCaller(key))
+}
+
+/// The two routes a dApp key opens: `POST` on [`APPROVE_HOSTING_PATH`] and
+/// `GET /v0/tenant/{party}/status`.
+fn is_dapp_call(method: &Method, path: &str) -> bool {
+    match *method {
+        Method::POST => path == APPROVE_HOSTING_PATH,
+        Method::GET => is_status_path(path),
+        _ => false,
+    }
+}
+
+/// `/v0/tenant/{party}/status`, with a party.
+fn is_status_path(path: &str) -> bool {
+    path.strip_prefix(TENANT_PREFIX)
+        .and_then(|route| route.strip_suffix("/status"))
+        .is_some_and(|party| !party.is_empty() && !party.contains('/'))
 }
 
 /// `GET /v0/tenant/{party}/acs/{target}` and `POST /v0/tenant/add-hosts/import`.
@@ -270,7 +317,7 @@ pub fn charge_tenant_key(
     };
     match state
         .tenant_rate_limiter
-        .check(key.index, limit, Instant::now())
+        .check(&key.id, limit, Instant::now())
     {
         Verdict::Allowed => Ok(()),
         Verdict::Limited { retry_after } => {
@@ -322,19 +369,23 @@ fn match_tenant_api_key(
         .and_then(|h| h.to_str().ok())
         .and_then(parse_bearer)
         .unwrap_or_default();
-    let matched = if presented.is_empty() {
-        None
-    } else {
-        state
-            .config
-            .tenant_api_keys
-            .iter()
+    if presented.is_empty() {
+        return Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"})));
+    }
+    let position = |keys: &[String]| {
+        keys.iter()
             .position(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()))
     };
+    // The tenant list goes first, so a key in both lists keeps its tenant
+    // rights.
+    let matched = position(&state.config.tenant_api_keys)
+        .map(|index| (index, false))
+        .or_else(|| position(&state.config.dapp_api_keys).map(|index| (index, true)));
     match matched {
-        Some(index) => Ok(Some(TenantKey {
+        Some((index, dapp)) => Ok(Some(TenantKey {
             index,
             id: tenant_key_id(presented),
+            dapp,
         })),
         None => Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"}))),
     }
@@ -927,6 +978,201 @@ mod tests {
             let body: serde_json::Value = test::read_body_json(resp).await;
             assert_eq!(body["index"], serde_json::Value::Null);
         }
+    }
+
+    /// [`tenant_state`] with the dApp keys `dapp` as well.
+    async fn dapp_state(keys: &[&str], dapp: &[&str], limit: u32) -> Data<AppState> {
+        let Ok(mut state) = Arc::try_unwrap(tenant_state(keys, limit).await.into_inner()) else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.config.dapp_api_keys = dapp.iter().map(ToString::to_string).collect();
+        Data::new(state)
+    }
+
+    /// Stands for the hosting approval. It answers with the key the middleware
+    /// attached.
+    #[actix_web::post("/v0/tenant/decentralized-party/approve-hosting")]
+    async fn stub_approve_hosting(req: HttpRequest, calls: Data<Calls>) -> impl Responder {
+        calls.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let key = tenant_caller(&req).ok().flatten();
+        HttpResponse::Ok().json(json!({
+            "index": key.as_ref().map(|k| k.index),
+            "dapp": key.as_ref().map(|k| k.dapp),
+        }))
+    }
+
+    #[get("/v0/tenant/{party}/status")]
+    async fn stub_tenant_status(calls: Data<Calls>) -> impl Responder {
+        calls.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        HttpResponse::Ok().finish()
+    }
+
+    fn approve_hosting(key: &str) -> TestRequest {
+        tenant_post(APPROVE_HOSTING_PATH, key, "{}")
+    }
+
+    fn tenant_get(uri: &str, key: &str) -> TestRequest {
+        TestRequest::get()
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {key}")))
+    }
+
+    /// A browser holds a dApp key, so it opens the approval and the status
+    /// read, and no other route.
+    #[actix_web::test]
+    async fn a_dapp_key_opens_only_the_dapp_routes() {
+        let calls = Data::new(Calls::default());
+        let app = test::init_service(
+            App::new()
+                .app_data(dapp_state(&["tenant"], &["dapp"], 0).await)
+                .app_data(calls.clone())
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write)
+                .service(stub_tenant_import)
+                .service(stub_tenant_acs)
+                .service(stub_approve_hosting)
+                .service(stub_tenant_status),
+        )
+        .await;
+
+        let resp = test::call_service(&app, approve_hosting("dapp").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body, json!({ "index": 0, "dapp": true }));
+        let resp = test::call_service(
+            &app,
+            tenant_get("/v0/tenant/alice::1220aa/status", "dapp").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(calls.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let refused = [
+            tenant_post("/v0/tenant/prepare", "dapp", "{}"),
+            tenant_post("/v0/tenant/execute", "dapp", "{}"),
+            tenant_post("/v0/tenant/add-hosts/import", "dapp", "{}"),
+            tenant_get("/v0/tenant/alice::1220aa/state", "dapp"),
+            tenant_get(
+                "/v0/tenant/alice::1220aa/acs/participant-3::1220bb?base_serial=1&seq=1",
+                "dapp",
+            ),
+            // The right path with the other method.
+            tenant_get(APPROVE_HOSTING_PATH, "dapp"),
+            tenant_post("/v0/tenant/alice::1220aa/status", "dapp", "{}"),
+        ];
+        for request in refused {
+            let request = request.to_request();
+            let route = format!("{} {}", request.method(), request.path());
+            let resp = test::call_service(&app, request).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{route}");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("dApp API key")),
+                "{route}: {body}"
+            );
+        }
+        assert_eq!(
+            calls.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no refused call may reach a handler"
+        );
+    }
+
+    /// A tenant key still opens every tenant route, the approval included.
+    #[actix_web::test]
+    async fn a_tenant_key_opens_the_approval_too() {
+        let app = test::init_service(
+            App::new()
+                .app_data(dapp_state(&["tenant"], &["dapp"], 0).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write)
+                .service(stub_approve_hosting),
+        )
+        .await;
+
+        let resp = test::call_service(&app, approve_hosting("tenant").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body, json!({ "index": 0, "dapp": false }));
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "tenant", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A key in both lists keeps its tenant rights.
+    #[actix_web::test]
+    async fn a_key_in_both_lists_is_a_tenant_key() {
+        let app = test::init_service(
+            App::new()
+                .app_data(dapp_state(&["tenant", "both"], &["both"], 0).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "both", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["index"], json!(1));
+    }
+
+    /// A tenant key and a dApp key can share an index, but each spends its own
+    /// budget. A refused call spends none.
+    #[actix_web::test]
+    async fn a_dapp_key_has_its_own_budget() {
+        let app = test::init_service(
+            App::new()
+                .app_data(dapp_state(&["tenant"], &["dapp"], 1).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write)
+                .service(stub_approve_hosting),
+        )
+        .await;
+        let forbidden = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "dapp", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let tenant = test::call_service(&app, approve_hosting("tenant").to_request()).await;
+        assert_eq!(tenant.status(), StatusCode::OK);
+        let spent = test::call_service(&app, approve_hosting("tenant").to_request()).await;
+        assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let dapp = test::call_service(&app, approve_hosting("dapp").to_request()).await;
+        assert_eq!(dapp.status(), StatusCode::OK);
+        let limited = test::call_service(&app, approve_hosting("dapp").to_request()).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited.headers().get(RETRY_AFTER).is_some());
+    }
+
+    #[test]
+    fn the_status_route_needs_one_party_segment() {
+        assert!(is_dapp_call(
+            &Method::GET,
+            "/v0/tenant/alice::1220aa/status"
+        ));
+        assert!(!is_dapp_call(&Method::GET, "/v0/tenant//status"));
+        assert!(!is_dapp_call(&Method::GET, "/v0/tenant/status"));
+        assert!(!is_dapp_call(&Method::GET, "/v0/tenant/a/b/status"));
+        assert!(!is_dapp_call(
+            &Method::GET,
+            "/v0/tenant/alice::1220aa/state"
+        ));
+        assert!(is_dapp_call(&Method::POST, APPROVE_HOSTING_PATH));
+        assert!(!is_dapp_call(&Method::PUT, APPROVE_HOSTING_PATH));
     }
 
     /// A handler reached without the middleware has no checked key, so it must

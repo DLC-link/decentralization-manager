@@ -10,9 +10,10 @@ use std::{
 /// How long one budget lasts.
 pub const WINDOW: Duration = Duration::from_secs(60);
 
-/// Request counts, keyed by the index of the key in `DECPM_TENANT_API_KEYS`.
+/// Request counts, keyed by the key's id. A tenant key and a dApp key can
+/// share an index, but never an id.
 #[derive(Default)]
-pub struct TenantRateLimiter(Mutex<HashMap<usize, Window>>);
+pub struct TenantRateLimiter(Mutex<HashMap<String, Window>>);
 
 struct Window {
     started: Instant,
@@ -31,17 +32,17 @@ pub enum Verdict {
 }
 
 impl TenantRateLimiter {
-    fn lock(&self) -> MutexGuard<'_, HashMap<usize, Window>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Window>> {
         // Nothing panics while holding the lock, so a poisoned map is intact.
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Count one request for `key_index`, unless its budget of `limit`
+    /// Count one request for the key `key_id`, unless its budget of `limit`
     /// requests in this window is already spent. A refused request does not
     /// count, so a caller that keeps retrying does not extend its own wait.
-    pub fn check(&self, key_index: usize, limit: u32, now: Instant) -> Verdict {
+    pub fn check(&self, key_id: &str, limit: u32, now: Instant) -> Verdict {
         let mut windows = self.lock();
-        let window = windows.entry(key_index).or_insert(Window {
+        let window = windows.entry(key_id.to_string()).or_insert(Window {
             started: now,
             count: 0,
         });
@@ -80,7 +81,7 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..3 {
             assert_eq!(
-                limiter.check(0, 3, t0 + i * SECOND),
+                limiter.check("a", 3, t0 + i * SECOND),
                 Verdict::Allowed,
                 "request {i}"
             );
@@ -91,10 +92,10 @@ mod tests {
     fn a_request_past_the_limit_waits_for_the_rest_of_the_window() {
         let limiter = TenantRateLimiter::default();
         let t0 = Instant::now();
-        assert_eq!(limiter.check(0, 2, t0), Verdict::Allowed);
-        assert_eq!(limiter.check(0, 2, t0 + SECOND), Verdict::Allowed);
+        assert_eq!(limiter.check("a", 2, t0), Verdict::Allowed);
+        assert_eq!(limiter.check("a", 2, t0 + SECOND), Verdict::Allowed);
         assert_eq!(
-            limiter.check(0, 2, t0 + 20 * SECOND),
+            limiter.check("a", 2, t0 + 20 * SECOND),
             Verdict::Limited {
                 retry_after: 40 * SECOND
             }
@@ -102,7 +103,7 @@ mod tests {
         // A refused request spends nothing, so the wait still ends with the
         // window.
         assert_eq!(
-            limiter.check(0, 2, t0 + 50 * SECOND),
+            limiter.check("a", 2, t0 + 50 * SECOND),
             Verdict::Limited {
                 retry_after: 10 * SECOND
             }
@@ -113,14 +114,14 @@ mod tests {
     fn a_new_window_starts_after_a_minute() {
         let limiter = TenantRateLimiter::default();
         let t0 = Instant::now();
-        assert_eq!(limiter.check(0, 1, t0), Verdict::Allowed);
+        assert_eq!(limiter.check("a", 1, t0), Verdict::Allowed);
         assert!(matches!(
-            limiter.check(0, 1, t0 + WINDOW - SECOND),
+            limiter.check("a", 1, t0 + WINDOW - SECOND),
             Verdict::Limited { .. }
         ));
-        assert_eq!(limiter.check(0, 1, t0 + WINDOW), Verdict::Allowed);
+        assert_eq!(limiter.check("a", 1, t0 + WINDOW), Verdict::Allowed);
         assert!(matches!(
-            limiter.check(0, 1, t0 + WINDOW + SECOND),
+            limiter.check("a", 1, t0 + WINDOW + SECOND),
             Verdict::Limited { .. }
         ));
     }
@@ -129,9 +130,9 @@ mod tests {
     fn each_key_has_its_own_budget() {
         let limiter = TenantRateLimiter::default();
         let t0 = Instant::now();
-        assert_eq!(limiter.check(0, 1, t0), Verdict::Allowed);
-        assert!(matches!(limiter.check(0, 1, t0), Verdict::Limited { .. }));
-        assert_eq!(limiter.check(1, 1, t0), Verdict::Allowed);
+        assert_eq!(limiter.check("a", 1, t0), Verdict::Allowed);
+        assert!(matches!(limiter.check("a", 1, t0), Verdict::Limited { .. }));
+        assert_eq!(limiter.check("b", 1, t0), Verdict::Allowed);
     }
 
     #[test]

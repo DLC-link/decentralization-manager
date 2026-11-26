@@ -243,7 +243,15 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
-        /// Requests per minute that one tenant API key may make to the
+        /// Comma-separated bearer API keys for a decentralized-party dApp. A
+        /// dApp key may call only `POST /v0/tenant/decentralized-party/approve-hosting`
+        /// and `GET /v0/tenant/{party}/status`. Each key has its own budget under
+        /// `DECPM_TENANT_RATE_LIMIT_PER_MINUTE`. Empty (default) accepts no dApp
+        /// key.
+        #[arg(long, env = "DECPM_DAPP_API_KEYS")]
+        dapp_api_keys: Option<String>,
+
+        /// Requests per minute that one tenant or dApp API key may make to the
         /// metered `/v0/tenant/*` endpoints. 0 disables the limit. Default 120.
         #[arg(long, env = "DECPM_TENANT_RATE_LIMIT_PER_MINUTE")]
         tenant_rate_limit_per_minute: Option<u32>,

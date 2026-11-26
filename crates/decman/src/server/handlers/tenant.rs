@@ -2553,6 +2553,7 @@ mod audit_tests {
         TenantKey {
             index: 0,
             id: crate::server::middleware::tenant_key_id("key"),
+            dapp: false,
         }
     }
 
@@ -3321,8 +3322,8 @@ mod approve_hosting_tests {
         }
     }
 
-    /// A node on a fake participant that checks the tenant key `"key"` against
-    /// a budget of `limit` calls per minute.
+    /// A node on a fake participant that checks the tenant key `"key"` and the
+    /// dApp key `"dapp-key"` against a budget of `limit` calls per minute.
     struct Host {
         fake: FakeAdminApi,
         _node: TestNode,
@@ -3340,6 +3341,7 @@ mod approve_hosting_tests {
             state.test_mode = false;
             state.config = node.config.clone();
             state.config.tenant_api_keys = vec!["key".to_string()];
+            state.config.dapp_api_keys = vec!["dapp-key".to_string()];
             state.config.tenant_rate_limit_per_minute = limit;
             Ok(Self {
                 fake,
@@ -3641,6 +3643,50 @@ mod approve_hosting_tests {
             json!("A Canton call failed on this host; see the host's logs")
         );
         only_row(&db, StatusCode::INTERNAL_SERVER_ERROR).await?;
+        Ok(())
+    }
+
+    /// A dApp key reaches the approval, and the row names it. The same key
+    /// gets a 403 from another tenant route, before that handler runs.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dapp_key_reaches_the_approval_and_no_other_write(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("dapp-key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let row = only_row(&db, StatusCode::ACCEPTED).await?;
+        assert_eq!(
+            row.key_id,
+            Some(crate::server::middleware::tenant_key_id("dapp-key"))
+        );
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(host.state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_execute),
+        )
+        .await;
+        let execute = actix_test::TestRequest::post()
+            .uri("/v0/tenant/execute")
+            .insert_header(("Authorization", "Bearer dapp-key"))
+            .set_json(json!({
+                "party_hint": "alice",
+                "public_key": STANDARD.encode([7u8; 32]),
+                "topology_transactions": [],
+                "signatures": [],
+                "signed_by": "1220ff",
+            }));
+        let refused = actix_test::call_service(&app, execute.to_request()).await;
+
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(audit_rows(&db).await?.len(), 1, "a 403 writes no row");
         Ok(())
     }
 
