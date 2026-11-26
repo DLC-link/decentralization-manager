@@ -505,7 +505,7 @@ Adapt the `ingressClassName` and TLS configuration to your cluster's Ingress con
 
 **Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. DecMan then answers with status 504 and a JSON body that names each party that did not confirm.
 
-DecMan stops waiting for the ledger 130 seconds after a write's first submission. A write with two submissions, such as a propose, shares those 130 seconds. When DecMan stops waiting, it answers with status 504 and says that the write may still complete. Set the response timeout of the Ingress or proxy to at least 150 seconds for every governance write, so DecMan's own answer reaches the caller. With ingress-nginx, for example, add these annotations to the Ingress:
+DecMan stops waiting for the ledger 130 seconds after a write starts. The ledger reads before a write and its submissions share those 130 seconds. When DecMan stops waiting, it answers with status 504 and says that the write may still complete. Set the response timeout of the Ingress or proxy to at least 150 seconds for every governance write, so DecMan's own answer reaches the caller. With ingress-nginx, for example, add these annotations to the Ingress:
 
 ```yaml
 metadata:
