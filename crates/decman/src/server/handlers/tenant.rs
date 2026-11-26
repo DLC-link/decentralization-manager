@@ -98,6 +98,7 @@ use super::{unhost::run_unhost, workflows::validate_confirmation_threshold};
         (status = 200, description = "Unsigned onboarding topology", body = TenantPrepareResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -174,6 +175,7 @@ pub async fn tenant_prepare(
         (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantExecuteResponse),
         (status = 400, description = "Bad request (bad base64, or signed_by != public_key fingerprint)", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Allocation failed on this participant", body = ErrorResponse)
     )
@@ -442,6 +444,7 @@ async fn tenant_approve_hosting_on_this_host(
         (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The serial differs, or the joiner is busy, disconnected, or still relaying an ACS", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -532,6 +535,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad host set, or a change this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -621,6 +625,7 @@ async fn tenant_add_hosts_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -714,6 +719,7 @@ async fn tenant_add_hosts_execute_on_this_host(
     responses(
         (status = 200, description = "Joiner is disconnected and its signatures are ready", body = TenantAddHostsStageResponse),
         (status = 400, description = "Invalid change or this participant is not a joiner", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "Another import owns the participant or the serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -778,6 +784,7 @@ pub async fn tenant_add_hosts_stage(
     responses(
         (status = 202, description = "Joiner signatures submitted", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "The signatures do not describe the requested change", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -871,6 +878,7 @@ pub async fn tenant_add_hosts_publish(
         (status = 200, description = "One block of the ACS", body = TenantAcsBlockResponse),
         (status = 400, description = "Bad target participant id or seq", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's export; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
@@ -1019,6 +1027,7 @@ pub async fn tenant_acs_snapshot(
         (status = 200, description = "Block taken; complete says whether the import finished", body = TenantAcsImportResponse),
         (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; only a block that opens a copy, or that no open copy takes, counts. Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1364,6 +1373,7 @@ async fn completed_tenant_import(
         (status = 200, description = "Unsigned threshold change", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "A threshold this party cannot meet", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1422,6 +1432,7 @@ pub async fn tenant_threshold_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "A threshold this party cannot field, or a party this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1498,6 +1509,7 @@ async fn tenant_threshold_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or a bundle that changes more than the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1584,6 +1596,7 @@ async fn tenant_threshold_execute_on_this_host(
     responses(
         (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
@@ -1643,6 +1656,7 @@ pub async fn tenant_party_state(
         (status = 202, description = "The topology write was accepted but is not effective yet; repeat the call", body = ExternalPartyUnhostResponse),
         (status = 400, description = "participant_id is not this host, this host is the last host, or the hosts left could not meet the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "This host does not host the party", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved, or an unhost or ACS relay for the party is running", body = ErrorResponse),
         (status = 422, description = "This host has no validator operator party, and splice_cleanup was not false", body = ErrorResponse),
@@ -1871,6 +1885,7 @@ const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
         (status = 200, description = "Unsigned conversion", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Not local to this participant, already converted, or a bad key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1919,6 +1934,7 @@ pub async fn tenant_local_party_adopt_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, not local to this participant, or a bundle that changes more than adopting the key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "A dApp API key may call only the dApp routes", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
