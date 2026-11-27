@@ -593,6 +593,21 @@ If you would rather not regenerate your Noise keypair (so peers don't have to up
 
 The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 5) and re-enter party credentials (Step 6) — the only thing you save is the round-trip with peers having to update their entry for you.
 
+## Upgrade notices
+
+The web UI tells the operator when a newer release exists. The operator's
+browser reads `version-policy.json` from
+`raw.githubusercontent.com/DLC-link/decentralization-manager/main/` once an
+hour. The node itself makes no outbound request.
+
+- A yellow banner means a newer release exists. The operator can dismiss it
+  until the next release.
+- An orange banner means this node runs below the minimum supported version.
+  The operator cannot dismiss it. Upgrade the node to remove it.
+
+A browser that cannot reach GitHub shows no banner. Everything else works as
+before.
+
 ## Upgrading an existing mesh to concurrent workflows
 
 The concurrent multi-instance workflow release changes the **Noise wire
