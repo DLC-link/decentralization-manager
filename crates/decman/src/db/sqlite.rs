@@ -4284,7 +4284,8 @@ mod tests {
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
         tx.upsert_dec_party(&test_dec_party("net-b")).await?;
 
-        // net-a: 2 owners, 1 participant. net-b: 1 owner, 2 participants.
+        // net-a: 2 owners, 1 participant, 1 contract. net-b: 1 owner,
+        // 2 participants, 2 contracts.
         tx.replace_dec_party_owners(
             &party_a,
             &["a-owner-1".to_string(), "a-owner-2".to_string()],
@@ -4324,6 +4325,26 @@ mod tests {
             ],
         )
         .await?;
+
+        let contract = |party: &str, contract_id: &str| DecPartyContractRow {
+            dec_party_id: party.to_string(),
+            contract_id: contract_id.to_string(),
+            template_id: "Governance.Rules:GovernanceRules".to_string(),
+            package_id: "#gov-core".to_string(),
+            package_name: "governance-core".to_string(),
+            package_version: "0.1.0".to_string(),
+            created_at: "2026-04-28T11:07:59.073177Z".to_string(),
+        };
+        tx.replace_dec_party_contracts(&party_a, &[contract(&party_a_str, "a-c1")])
+            .await?;
+        tx.replace_dec_party_contracts(
+            &party_b,
+            &[
+                contract(&party_b_str, "b-c1"),
+                contract(&party_b_str, "b-c2"),
+            ],
+        )
+        .await?;
         Commitable::commit(tx).await?;
 
         // Empty prefix → every JOIN-matched row across both parties.
@@ -4353,6 +4374,30 @@ mod tests {
         let b_participants = pool.get_all_dec_party_participants("net-b").await?;
         assert_eq!(b_participants.len(), 2);
         assert!(b_participants.iter().all(|p| p.dec_party_id == party_b_str));
+
+        // The party list reads contracts only through this bulk getter.
+        let contract_ids = |rows: &[DecPartyContractRow]| {
+            let mut ids: Vec<_> = rows
+                .iter()
+                .map(|c| (c.dec_party_id.clone(), c.contract_id.clone()))
+                .collect();
+            ids.sort();
+            ids
+        };
+        let all_contracts = pool.get_all_dec_party_contracts("").await?;
+        assert_eq!(all_contracts.len(), 3);
+        assert_eq!(
+            contract_ids(&pool.get_all_dec_party_contracts("net-a").await?),
+            vec![(party_a_str.clone(), "a-c1".to_string())]
+        );
+        assert_eq!(
+            contract_ids(&pool.get_all_dec_party_contracts("net-b").await?),
+            vec![
+                (party_b_str.clone(), "b-c1".to_string()),
+                (party_b_str.clone(), "b-c2".to_string()),
+            ]
+        );
+        assert!(pool.get_all_dec_party_contracts("net-c").await?.is_empty());
 
         Ok(())
     }
