@@ -18,7 +18,7 @@ use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_servic
 use crate::{
     canton_id::{CantonId, Fingerprint, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
-    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK, ROTATE_KEY},
+    consts::{MAX_DAR_PULL_TOTAL, MIN_PEER_VERSION, OWNER_ONLY_KICK, PER_DAR_PULL, ROTATE_KEY},
     db::{
         rows::{DecPartyOwnerRow, DecPartyParticipantRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -3892,8 +3892,8 @@ pub async fn upload_dars_local(
         (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 409, description = "A run in progress already sends one of these DARs to one of these peers", body = ErrorResponse),
-        (status = 413, description = "The DAR set exceeds the size one run can carry", body = ErrorResponse),
+        (status = 409, description = "A run in progress already sends one of these DARs to one of these peers, or a peer cannot take a set this large", body = ErrorResponse),
+        (status = 413, description = "A DAR, or the DAR set, exceeds the size one run can carry", body = ErrorResponse),
         (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
     )
 )]
@@ -3929,7 +3929,7 @@ pub async fn start_dars(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No DAR on this node holds the package", body = ErrorResponse),
-        (status = 409, description = "A run in progress already sends this DAR to one of these peers", body = ErrorResponse),
+        (status = 409, description = "A run in progress already sends this DAR to one of these peers, or a peer cannot take a DAR this large", body = ErrorResponse),
         (status = 413, description = "The DAR exceeds the size one run can carry", body = ErrorResponse),
         (status = 500, description = "The DAR could not be read", body = ErrorResponse),
         (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
@@ -3973,15 +3973,15 @@ pub async fn start_dars_for_package(
 /// Why a DAR set is refused: the HTTP status and the reason.
 type DarsRefusal = (StatusCode, String);
 
-/// Decode a DAR set, refusing one whose encoded `UploadDars` bundle exceeds
-/// `limit` bytes.
+/// Decode a DAR set, refusing a DAR above `dar_limit` bytes or a set whose
+/// encoded `UploadDars` bundle exceeds `run_limit` bytes.
 ///
-/// A peer checks the size only after it accepts the invitation, so the
-/// coordinator checks it first. The bundle frames each file with its name and
-/// two lengths, and those bytes count toward the limit.
+/// A peer checks the sizes only after it accepts the invitation, so the
+/// coordinator checks them first.
 fn decode_dars_within(
     files: Vec<DarFile>,
-    limit: usize,
+    dar_limit: usize,
+    run_limit: usize,
 ) -> std::result::Result<Vec<(String, Vec<u8>)>, DarsRefusal> {
     let count = files.len();
     let mut decoded = Vec::with_capacity(count);
@@ -4001,65 +4001,88 @@ fn decode_dars_within(
         .iter()
         .map(|(name, data)| (name.as_str(), data.len()))
         .collect();
-    let Some(error) = bundle_size_refusal(&sizes, limit) else {
+    let Some(error) = dar_set_refusal(&sizes, dar_limit, run_limit) else {
         return Ok(decoded);
     };
     tracing::warn!("Refused to distribute {count} DAR file(s): {error}");
     Err((StatusCode::PAYLOAD_TOO_LARGE, error))
 }
 
-/// Why the bundle of `files`, each a name and a DAR length, does not fit in
-/// `limit` bytes, or `None` when it fits.
+/// Why the DAR set `files`, each a name and a DAR length, cannot go in one
+/// run, or `None` when it can.
 ///
-/// A DAR that is over the limit alone can never be distributed, so the
-/// refusal names it and does not suggest several runs.
-fn bundle_size_refusal(files: &[(&str, usize)], limit: usize) -> Option<String> {
-    // A size too large to count is over any limit.
-    let size_of = |files: &[(&str, usize)]| {
-        utils::encoded_files_len(files.iter().map(|(name, len)| (name.len(), *len)))
-            .unwrap_or(usize::MAX)
-    };
-    let size = size_of(files);
-    if size <= limit {
-        return None;
-    }
+/// A peer pulls each DAR in one chunked transfer, so one DAR takes at most
+/// `dar_limit` bytes. No split helps a larger DAR, so the refusal names it and
+/// does not suggest several runs. The bundle frames each file with its name
+/// and two lengths, and those bytes count toward `run_limit`.
+fn dar_set_refusal(files: &[(&str, usize)], dar_limit: usize, run_limit: usize) -> Option<String> {
     let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    let limit_text = format!("{limit} bytes ({limit_mib:.1} MiB)", limit_mib = mib(limit));
-    let over = |size: usize| {
-        format!(
-            "That is {over} bytes over the limit of {limit_text}.",
-            over = size - limit
-        )
-    };
-    let alone: Vec<(&str, usize)> = files
+    let limit_text = |limit: usize| format!("{limit} bytes ({:.1} MiB)", mib(limit));
+    let oversized: Vec<(&str, usize)> = files
         .iter()
-        .map(|file| (file.0, size_of(std::slice::from_ref(file))))
-        .filter(|(_, size)| *size > limit)
+        .copied()
+        .filter(|(_, len)| *len > dar_limit)
         .collect();
-    Some(match alone.as_slice() {
-        [] => format!(
+    match oversized.as_slice() {
+        [] => {}
+        [(name, len)] => {
+            return Some(format!(
+                "{name} is too large to distribute. It takes {len} bytes ({len_mib:.1} MiB), and \
+                 one DAR can take at most {limit}. Upload it to each node separately instead.",
+                len_mib = mib(*len),
+                limit = limit_text(dar_limit),
+            ));
+        }
+        several => {
+            return Some(format!(
+                "These DARs are each too large to distribute: {names}. One DAR can take at most \
+                 {limit}. Upload them to each node separately instead.",
+                names = several
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                limit = limit_text(dar_limit),
+            ));
+        }
+    }
+    // A size too large to count is over any limit.
+    let size = utils::encoded_files_len(files.iter().map(|(name, len)| (name.len(), *len)))
+        .unwrap_or(usize::MAX);
+    (size > run_limit).then(|| {
+        format!(
             "The DAR set is too large for one run. The files and their names take {size} bytes \
-             ({size_mib:.1} MiB). {over} Send the files in several runs, each within the limit.",
+             ({size_mib:.1} MiB). That is {over} bytes over the limit of {limit}. Send the files \
+             in several runs, each within the limit.",
             size_mib = mib(size),
-            over = over(size),
-        ),
-        [(name, alone_size)] => format!(
-            "{name} is too large to distribute, even on its own. The file and its name take \
-             {alone_size} bytes ({size_mib:.1} MiB). {over} Upload it to each node separately \
-             instead.",
-            size_mib = mib(*alone_size),
-            over = over(*alone_size),
-        ),
-        several => format!(
-            "These DARs are each too large to distribute, even on their own: {names}. The limit \
-             is {limit_text}. Upload them to each node separately instead.",
-            names = several
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
+            over = size - run_limit,
+            limit = limit_text(run_limit),
+        )
     })
+}
+
+/// Whether an older peer refuses a run whose `UploadDars` bundle takes
+/// `bundle_len` bytes. An older peer takes the whole bundle in one chunked
+/// transfer. Only a peer that lists [`PER_DAR_PULL`] can take a larger run.
+fn older_peers_refuse_bundle(bundle_len: usize) -> bool {
+    bundle_len > MAX_CHUNKED_TOTAL_SIZE
+}
+
+/// Operator-facing 409 message naming each peer that cannot take a DAR run
+/// whose bundle of `bundle_len` bytes an older peer refuses.
+fn format_peers_lacking_per_dar_pull(lacking: &[(String, String)], bundle_len: usize) -> String {
+    let list = lacking
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let limit_mib = MAX_CHUNKED_TOTAL_SIZE / (1024 * 1024);
+    format!(
+        "Cannot start the run: the DARs and their names take {bundle_len} bytes. An older peer \
+         takes at most {MAX_CHUNKED_TOTAL_SIZE} bytes ({limit_mib} MiB) in one run. These peers \
+         cannot pull each DAR on its own: {list}. Upgrade them, or send the files in several \
+         runs, each within {limit_mib} MiB."
+    )
 }
 
 /// Serializes starting and retrying DAR runs, so the duplicate check sees
@@ -4126,7 +4149,7 @@ async fn launch_dars(
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
 ) -> HttpResponse {
-    let files = match decode_dars_within(dar_files, MAX_CHUNKED_TOTAL_SIZE) {
+    let files = match decode_dars_within(dar_files, MAX_CHUNKED_TOTAL_SIZE, MAX_DAR_PULL_TOTAL) {
         Ok(files) => files,
         Err((status, error)) => return HttpResponse::build(status).json(ErrorResponse { error }),
     };
@@ -4152,11 +4175,22 @@ async fn launch_dars(
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
-    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
+    let health = probe_invitee_health(&data.config, &data.db, &peer_ids).await;
+    let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+    // An older peer refuses a large bundle only after it accepts the
+    // invitation, so the run would fail on that peer.
+    if older_peers_refuse_bundle(bundle.len()) {
+        let lacking = lacking_feature(&health, PER_DAR_PULL);
+        if !lacking.is_empty() {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format_peers_lacking_per_dar_pull(&lacking, bundle.len()),
+            });
+        }
     }
 
     // Held from the duplicate check through the insert, so two identical
@@ -7898,7 +7932,8 @@ mod tests {
     /// Two DARs that fit alone but not together can go in two runs.
     #[test]
     fn a_set_above_the_limit_states_its_size_and_excess() -> Result {
-        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 60)], 100).map(drop);
+        let refusal =
+            decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 60)], 100, 100).map(drop);
         let Err((status, error)) = refusal else {
             anyhow::bail!("a 150-byte bundle must be refused at limit 100");
         };
@@ -7912,23 +7947,23 @@ mod tests {
         Ok(())
     }
 
-    /// No split helps a DAR that is over the limit alone, so the refusal
+    /// No split helps a DAR above the limit for one DAR, so the refusal
     /// names it and does not suggest several runs.
     #[test]
-    fn a_dar_over_the_limit_alone_is_named_without_advice_to_split() -> Result {
+    fn a_dar_over_the_dar_limit_is_named_without_advice_to_split() -> Result {
         let refusal =
-            decode_dars_within(vec![dar("a.dar", 10), dar("big.dar", 120)], 100).map(drop);
+            decode_dars_within(vec![dar("a.dar", 10), dar("big.dar", 120)], 100, 1000).map(drop);
         let Err((status, error)) = refusal else {
-            anyhow::bail!("a DAR over the limit alone must be refused");
+            anyhow::bail!("a DAR over the DAR limit must be refused");
         };
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
             error.starts_with("big.dar is too large to distribute"),
             "{error}"
         );
-        assert!(error.contains("its name take 139 bytes"), "{error}");
+        assert!(error.contains("It takes 120 bytes"), "{error}");
         assert!(
-            error.contains("39 bytes over the limit of 100 bytes"),
+            error.contains("one DAR can take at most 100 bytes"),
             "{error}"
         );
         assert!(!error.contains("several runs"), "{error}");
@@ -7936,23 +7971,72 @@ mod tests {
     }
 
     #[test]
-    fn every_dar_over_the_limit_alone_is_named() {
-        let refusal = bundle_size_refusal(&[("x.dar", 120), ("a.dar", 1), ("y.dar", 130)], 100)
+    fn every_dar_over_the_dar_limit_is_named() {
+        let refusal = dar_set_refusal(&[("x.dar", 120), ("a.dar", 1), ("y.dar", 130)], 100, 1000)
             .unwrap_or_default();
         assert!(refusal.contains(": x.dar, y.dar."), "{refusal}");
         assert!(!refusal.contains("several runs"), "{refusal}");
     }
 
+    /// The peer refuses a DAR above `MAX_CHUNKED_TOTAL_SIZE` by its own
+    /// bytes, so the file name does not count toward that limit.
+    #[test]
+    fn a_dar_of_exactly_the_chunked_limit_passes() {
+        let limits = (MAX_CHUNKED_TOTAL_SIZE, MAX_DAR_PULL_TOTAL);
+        assert_eq!(
+            dar_set_refusal(&[("a.dar", MAX_CHUNKED_TOTAL_SIZE)], limits.0, limits.1),
+            None
+        );
+        assert!(
+            dar_set_refusal(&[("a.dar", MAX_CHUNKED_TOTAL_SIZE + 1)], limits.0, limits.1).is_some()
+        );
+    }
+
+    /// The peer adds up the DAR bytes and refuses a run above
+    /// `MAX_DAR_PULL_TOTAL`. The coordinator also counts the names and the
+    /// framing, so it never starts a run that a peer refuses.
+    #[test]
+    fn a_set_within_the_run_cap_passes_and_one_above_it_is_refused() {
+        let dar = 15 * 1024 * 1024;
+        let names: Vec<String> = (0..18).map(|n| format!("package-{n:02}.dar")).collect();
+        let set = |count: usize| -> Vec<(&str, usize)> {
+            names[..count]
+                .iter()
+                .map(|name| (name.as_str(), dar))
+                .collect()
+        };
+        assert_eq!(
+            dar_set_refusal(&set(17), MAX_CHUNKED_TOTAL_SIZE, MAX_DAR_PULL_TOTAL),
+            None
+        );
+        let refusal = dar_set_refusal(&set(18), MAX_CHUNKED_TOTAL_SIZE, MAX_DAR_PULL_TOTAL)
+            .unwrap_or_default();
+        assert!(refusal.contains("too large for one run"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("the limit of {MAX_DAR_PULL_TOTAL} bytes")),
+            "{refusal}"
+        );
+        assert!(refusal.contains("several runs"), "{refusal}");
+    }
+
     /// A size too large to add up is refused, not wrapped to a small one.
     #[test]
     fn a_size_that_overflows_is_refused() {
-        assert!(bundle_size_refusal(&[("a.dar", usize::MAX)], 100).is_some());
-        assert!(bundle_size_refusal(&[("a.dar", usize::MAX - 20), ("b.dar", 10)], 100).is_some());
+        assert!(dar_set_refusal(&[("a.dar", usize::MAX)], usize::MAX, 100).is_some());
+        assert!(
+            dar_set_refusal(
+                &[("a.dar", usize::MAX - 20), ("b.dar", 10)],
+                usize::MAX,
+                100
+            )
+            .is_some()
+        );
     }
 
     #[test]
     fn framing_bytes_count_toward_the_limit() {
-        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 40)], 100).map(drop);
+        let refusal =
+            decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 40)], 100, 100).map(drop);
         assert!(
             matches!(refusal, Err((StatusCode::PAYLOAD_TOO_LARGE, _))),
             "100 DAR bytes plus framing must exceed limit 100: {refusal:?}"
@@ -7962,7 +8046,7 @@ mod tests {
     #[test]
     fn a_bundle_at_the_limit_passes() {
         assert_eq!(
-            decode_dars_within(vec![dar("a.dar", 83)], 100).map(drop),
+            decode_dars_within(vec![dar("a.dar", 83)], 100, 100).map(drop),
             Ok(())
         );
     }
@@ -7976,7 +8060,7 @@ mod tests {
                 data: "not base64!".to_string(),
             },
         ];
-        let Err((status, error)) = decode_dars_within(files.to_vec(), 100).map(drop) else {
+        let Err((status, error)) = decode_dars_within(files.to_vec(), 100, 100).map(drop) else {
             anyhow::bail!("a DAR that is not base64 must be refused");
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -7984,43 +8068,21 @@ mod tests {
         Ok(())
     }
 
-    /// One DAR the size of the limit fails only through its framing. The run
-    /// is refused before it is registered, so no peer is invited.
+    /// One DAR one byte above the chunked limit. The run is refused before it
+    /// is registered, so no peer is invited.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn an_oversized_distribute_sends_no_invitation(pool: SqlitePool) -> Result {
         let data = state_on(pool.clone()).await?;
-        let app = actix_test::init_service(
-            App::new()
-                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .app_data(data.clone())
-                .service(start_dars),
-        )
-        .await;
-        let request = actix_test::TestRequest::post()
-            .uri("/dars/distribute")
-            .set_json(serde_json::json!({
-                "dar_files": [dar("big.dar", MAX_CHUNKED_TOTAL_SIZE)],
-                "peer_ids": [pid(2)?],
-            }))
-            .to_request();
-        request.extensions_mut().insert(admin());
+        let size = MAX_CHUNKED_TOTAL_SIZE + 1;
 
-        let response = actix_test::call_service(&app, request).await;
+        let (status, body) = post_dars(data.clone(), &[dar("big.dar", size)]).await?;
 
-        let status = response.status();
-        let body = actix_test::read_body(response).await;
-        let body = String::from_utf8_lossy(&body);
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
         assert!(
             body.contains("big.dar is too large to distribute"),
             "{body}"
         );
-        assert!(
-            body.contains(&format!(
-                "19 bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes"
-            )),
-            "{body}"
-        );
+        assert!(body.contains(&format!("It takes {size} bytes")), "{body}");
         assert!(
             pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
                 .await?
@@ -8050,42 +8112,70 @@ mod tests {
         Ok(utils::encode_files(&decoded))
     }
 
-    /// The coordinator must refuse exactly the sets a peer would refuse. A
-    /// stricter check blocks runs that would work. A looser one lets the peer
-    /// fail after it accepts, which is the fault this check prevents.
+    /// An older peer takes the whole bundle in one chunked transfer. The
+    /// coordinator must ask for `per-dar-pull` exactly when such a peer
+    /// refuses the bundle. A stricter check blocks runs that would work. A
+    /// looser one lets the older peer fail after it accepts.
     #[test]
-    fn the_coordinator_refuses_exactly_what_a_peer_refuses() -> anyhow::Result<()> {
+    fn per_dar_pull_is_needed_exactly_when_an_older_peer_refuses() -> anyhow::Result<()> {
         use crate::noise::{CHUNK_SIZE, check_chunked_metadata};
 
         for bundle_len in [MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKED_TOTAL_SIZE + 1] {
             let files = three_dars_of_bundle(bundle_len);
             let bundle = bundle_of(&files)?;
             assert_eq!(bundle.len(), bundle_len);
-            let peer = check_chunked_metadata(bundle.len(), bundle.len().div_ceil(CHUNK_SIZE));
-            let coordinator = decode_dars_within(files.clone(), MAX_CHUNKED_TOTAL_SIZE).map(drop);
+            let older_peer =
+                check_chunked_metadata(bundle.len(), bundle.len().div_ceil(CHUNK_SIZE));
             assert_eq!(
-                coordinator.is_ok(),
-                peer.is_ok(),
-                "bundle of {bundle_len} bytes: coordinator {coordinator:?}, peer {peer:?}"
+                older_peers_refuse_bundle(bundle.len()),
+                older_peer.is_err(),
+                "bundle of {bundle_len} bytes: older peer {older_peer:?}"
+            );
+            assert_eq!(
+                decode_dars_within(files, MAX_CHUNKED_TOTAL_SIZE, MAX_DAR_PULL_TOTAL).map(drop),
+                Ok(()),
+                "a new peer takes a bundle of {bundle_len} bytes"
             );
         }
         Ok(())
     }
 
-    /// Issue #616: many DARs, each well below the limit, that exceed it
-    /// together. The refusal states the exact size of the bundle a peer
-    /// would have received.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn many_small_dars_above_the_limit_together_are_refused(pool: SqlitePool) -> Result {
-        let files: Vec<DarFile> = (0..9)
-            .map(|n| dar(&format!("package-{n}.dar"), 2 * 1024 * 1024))
-            .collect();
-        let size = bundle_of(&files)?.len();
-        let data = state_on(pool.clone()).await?;
+    /// A peer that lists `per-dar-pull` passes. A peer on an older build, or
+    /// one that did not answer, blocks a large run, and the message names it.
+    #[test]
+    fn a_large_dar_run_needs_every_peer_to_pull_each_dar() {
+        assert!(crate::consts::FEATURES.contains(&PER_DAR_PULL));
+        let replies: Vec<InviteeHealth> = vec![
+            (
+                "p2".to_string(),
+                Ok(health_reply("1.15.0", crate::consts::FEATURES)),
+            ),
+            ("p3".to_string(), Ok(health_reply("1.15.0", &[ROTATE_KEY]))),
+            ("p4".to_string(), Err("timed out".to_string())),
+        ];
+        let lacking = lacking_feature(&replies, PER_DAR_PULL);
+        let message = format_peers_lacking_per_dar_pull(&lacking, MAX_CHUNKED_TOTAL_SIZE + 1);
+        assert!(
+            message.contains("p3 (running version 1.15.0)") && message.contains("p4 ("),
+            "{message}"
+        );
+        assert!(!message.contains("p2"), "{message}");
+        assert!(
+            message.contains(&format!("take {} bytes", MAX_CHUNKED_TOTAL_SIZE + 1)),
+            "{message}"
+        );
+        assert!(message.contains("Upgrade them"), "{message}");
+        assert!(message.contains("within 16 MiB"), "{message}");
+    }
+
+    async fn post_dars(
+        data: web::Data<AppState>,
+        files: &[DarFile],
+    ) -> Result<(StatusCode, String)> {
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .app_data(data.clone())
+                .app_data(data)
                 .service(start_dars),
         )
         .await;
@@ -8097,31 +8187,142 @@ mod tests {
             }))
             .to_request();
         request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
 
-        let response = actix_test::call_service(&app, request).await;
+    /// A node with `pid(1)` as itself and one peer, `pid(2)`, served on this
+    /// host. The peer answers every Noise request with a `Health` reply on
+    /// this build that lists `features`. The returned directory holds the
+    /// node's Noise key.
+    async fn state_with_health_peer(
+        pool: SqlitePool,
+        features: &[&str],
+    ) -> Result<(web::Data<AppState>, tempfile::TempDir)> {
+        use tokio_noise::handshakes::nn_psk2::Responder;
 
-        let status = response.status();
-        let body = actix_test::read_body(response).await;
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
-        assert!(
-            body.contains(&format!("their names take {size} bytes")),
-            "{body}"
-        );
+        let root = tempfile::tempdir()?;
+        let state = Arc::try_unwrap(state_on(pool.clone()).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        config.node.participant_id = Some(pid(1)?);
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+
+        let peer_keys = NoiseKeypair::generate();
+        let psk = *peer_keys.derive_psk(&keys.public_key);
+        let health = crate::server::health::HealthResponse {
+            participant_id: pid(2)?.to_string(),
+            in_workflow: false,
+            workflow: None,
+            workflow_count: 0,
+            version: crate::build_info::SEMVER.to_string(),
+            build_version: String::new(),
+            features: features.iter().map(ToString::to_string).collect(),
+        }
+        .to_payload();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let health = health.clone();
+                let _ = hyper_noise::server::serve_http(
+                    socket,
+                    Responder::new(move |_: &[u8]| Some(psk)),
+                    move |_: &[u8], _: hyper::Request<hyper::Body>| {
+                        let reply = Message::new(MessageType::HealthResponse, health.clone());
+                        async move {
+                            Ok::<_, anyhow::Error>(hyper::Response::new(hyper::Body::from(
+                                reply.to_bytes(),
+                            )))
+                        }
+                    },
+                    Some(std::time::Duration::from_secs(5)),
+                )
+                .await;
+            }
+        });
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.insert_peer(&crate::config::Peer {
+            participant_id: pid(2)?,
+            name: "peer-2".to_string(),
+            address: "127.0.0.1".to_string(),
+            port,
+            public_key: peer_keys.public_key_hex(),
+            party: None,
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        Ok((web::Data::new(AppState { config, ..state }), root))
+    }
+
+    /// Two DARs, each within the chunked limit, whose bundle is above it.
+    fn a_set_above_the_chunked_limit() -> Vec<DarFile> {
+        vec![
+            dar("package-a.dar", 9 * 1024 * 1024),
+            dar("package-b.dar", 8 * 1024 * 1024),
+        ]
+    }
+
+    /// Issue #616: DARs that each fit one chunked transfer but exceed it
+    /// together. An older peer refuses the bundle after it accepts, so the
+    /// run is refused before any invitation, and the refusal names the peer.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_large_set_is_refused_when_a_peer_cannot_pull_each_dar(pool: SqlitePool) -> Result {
+        let (data, _root) = state_with_health_peer(pool.clone(), &[ROTATE_KEY]).await?;
+
+        let (status, body) = post_dars(data.clone(), &a_set_above_the_chunked_limit()).await?;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        // The reason shows that the peer answered the probe, so the check
+        // read its feature list.
         assert!(
             body.contains(&format!(
-                "{over} bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes",
-                over = size - MAX_CHUNKED_TOTAL_SIZE
+                "{} (running version {})",
+                pid(2)?,
+                crate::build_info::SEMVER
             )),
             "{body}"
         );
-        assert!(body.contains("several runs"), "{body}");
+        assert!(body.contains("cannot pull each DAR on its own"), "{body}");
+        assert!(body.contains("Upgrade them"), "{body}");
         assert!(
             pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
                 .await?
                 .is_empty()
         );
         assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// Issue #616: the same set starts when every peer pulls each DAR on its
+    /// own, because the chunked limit then applies to one DAR.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_large_set_starts_when_every_peer_pulls_each_dar(pool: SqlitePool) -> Result {
+        let (data, _root) = state_with_health_peer(pool.clone(), crate::consts::FEATURES).await?;
+
+        let (status, body) = post_dars(data, &a_set_above_the_chunked_limit()).await?;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
+                .await?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    /// An older peer still takes a set within the chunked limit as one
+    /// bundle, so the feature check applies only above it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_set_within_the_chunked_limit_starts_with_an_older_peer(pool: SqlitePool) -> Result {
+        let (data, _root) = state_with_health_peer(pool.clone(), &[]).await?;
+
+        let (status, body) = post_dars(data, &[dar("small.dar", 1024)]).await?;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
         Ok(())
     }
 

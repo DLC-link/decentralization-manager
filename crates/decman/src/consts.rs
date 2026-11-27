@@ -130,7 +130,7 @@ pub const ROTATE_KEY: &str = "rotate-key";
 /// bundle on the coordinator. It pulls only when the accepted invitation
 /// carries the coordinator's run instance and one hash for each DAR; without
 /// them it takes the bundle. A coordinator checks every invitee lists this
-/// before it sends a run without the bundle.
+/// before it starts a run whose bundle is above the chunked limit.
 ///
 /// The flag also implies the cap: a peer that lists it accepts at most
 /// [`MAX_DAR_PULL_TOTAL`] bytes of DARs in one run. A later change to the cap

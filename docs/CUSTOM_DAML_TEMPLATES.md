@@ -329,7 +329,7 @@ daml build --all
 DecMan provides two endpoints for getting a DAR onto Canton:
 
 - `POST /dars/upload` — uploads the DAR to *this node only*. Accepts `DarsRequest` with `peer_ids` ignored.
-- `POST /dars/distribute` — runs a multi-party workflow that uploads the DAR to every participant. Requires `peer_ids` to be **non-empty**; the handler rejects an empty array with 400. One run carries at most 16 MiB, and the file names count toward that limit. The handler rejects a larger set with 413.
+- `POST /dars/distribute` — runs a multi-party workflow that uploads the DAR to every participant. Requires `peer_ids` to be **non-empty**; the handler rejects an empty array with 400. One DAR can take at most 16 MiB. The handler rejects a larger DAR with 413. A set above 16 MiB needs every invited peer to list `per-dar-pull` in its Health reply. Otherwise the handler rejects the set with 409.
 
 For production, always use `/dars/distribute` so every node has the same package vetted at the same time:
 
