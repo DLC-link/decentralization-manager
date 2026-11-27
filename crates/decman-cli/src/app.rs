@@ -24,6 +24,7 @@ use crate::api::{
     FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KeyStatus,
     KnownMember, NetworkInfo, PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
 };
+use crate::auth::now_secs;
 use crate::composer::{
     self, Composer, ComposerContext, ComposerSubmit, FieldKind, PickerOption, PickerSource,
     SelectOption, TypeOption,
@@ -155,7 +156,6 @@ pub enum Request {
     Governance {
         party_id: String,
         party_name: String,
-        governance_type: String,
     },
     GovAction(Box<GovActionRequest>),
     OperatorInfo,
@@ -303,9 +303,6 @@ pub enum GovItem {
 pub struct GovView {
     pub party_name: String,
     pub party_id: String,
-    /// The party's governance type, used for off-chain actions and to refresh
-    /// the overlay after a mutation.
-    pub governance_type: String,
     pub rules_contract_id: String,
     pub member_party_id: String,
     pub threshold: i32,
@@ -352,7 +349,6 @@ pub struct ComposerPick {
     pub kind: ComposerKind,
     pub party_id: String,
     pub party_name: String,
-    pub governance_type: String,
     pub rules_contract_id: String,
     pub default_threshold: i64,
     pub options: Vec<TypeOption>,
@@ -384,8 +380,6 @@ pub struct GovActionRequest {
     op: GovOp,
     party_id: String,
     party_name: String,
-    /// Party-level governance type, used to refresh the overlay after the op.
-    governance_type: String,
     rules_contract_id: String,
 }
 
@@ -852,9 +846,8 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         Request::Governance {
             party_id,
             party_name,
-            governance_type,
         } => Update::Governance(
-            build_gov_view(client, &party_id, &party_name, &governance_type)
+            build_gov_view(client, &party_id, &party_name)
                 .map(Box::new)
                 .map_err(err),
         ),
@@ -863,11 +856,10 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
                 op,
                 party_id,
                 party_name,
-                governance_type,
                 rules_contract_id,
             } = *request;
             let result = perform_gov_op(client, &party_id, &rules_contract_id, &op)
-                .and_then(|()| build_gov_view(client, &party_id, &party_name, &governance_type))
+                .and_then(|()| build_gov_view(client, &party_id, &party_name))
                 .map(Box::new)
                 .map_err(err);
             Update::Governance(result)
@@ -995,12 +987,7 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
 
 /// Fetch the pending governance confirmations for a party and assemble the
 /// approvals view (off-chain actions first, then on-chain proposals).
-fn build_gov_view(
-    client: &mut DecmanClient,
-    party_id: &str,
-    party_name: &str,
-    governance_type: &str,
-) -> Result<GovView> {
+fn build_gov_view(client: &mut DecmanClient, party_id: &str, party_name: &str) -> Result<GovView> {
     let GovernanceConfirmations {
         actions,
         domain_actions,
@@ -1022,7 +1009,6 @@ fn build_gov_view(
     Ok(GovView {
         party_name: party_name.to_owned(),
         party_id: party_id.to_owned(),
-        governance_type: governance_type.to_owned(),
         rules_contract_id,
         // Empty is tolerated: it only weakens "revoke", which already handles
         // not finding this node's own confirmation gracefully.
@@ -1379,16 +1365,6 @@ fn party_governance_type(party: &DecentralizedParty) -> Option<&'static str> {
             None
         }
     })
-}
-
-/// Current unix time in seconds (0 if the clock is before the epoch).
-fn now_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or(0)
 }
 
 /// The select option value one step forward / back from `current`.
@@ -2600,31 +2576,21 @@ impl App {
             let Overlay::Governance(view) = &self.overlay else {
                 return;
             };
-            if matches!(kind, ComposerKind::Proposal) && view.governance_type != "core_self" {
-                None
-            } else {
-                let options = match kind {
-                    ComposerKind::Action => composer::action_types(&view.governance_type),
-                    ComposerKind::Proposal => composer::proposal_types(),
-                };
-                Some(ComposerPick {
-                    kind,
-                    party_id: view.party_id.clone(),
-                    party_name: view.party_name.clone(),
-                    governance_type: view.governance_type.clone(),
-                    rules_contract_id: view.rules_contract_id.clone(),
-                    default_threshold: i64::from(view.threshold),
-                    options,
-                    selected: 0,
-                })
+            let options = match kind {
+                ComposerKind::Action => composer::action_types(),
+                ComposerKind::Proposal => composer::proposal_types(),
+            };
+            ComposerPick {
+                kind,
+                party_id: view.party_id.clone(),
+                party_name: view.party_name.clone(),
+                rules_contract_id: view.rules_contract_id.clone(),
+                default_threshold: i64::from(view.threshold),
+                options,
+                selected: 0,
             }
         };
-        self.overlay = match pick {
-            Some(pick) => Overlay::ComposerPick(Box::new(pick)),
-            None => Overlay::Message(
-                "Proposals are only available on core-self governance parties.".to_owned(),
-            ),
-        };
+        self.overlay = Overlay::ComposerPick(Box::new(pick));
     }
 
     /// Open the composer form for the type selected in the picker.
@@ -2657,7 +2623,6 @@ impl App {
                 submit,
                 party_id: pick.party_id.clone(),
                 party_name: pick.party_name.clone(),
-                governance_type: pick.governance_type.clone(),
                 rules_contract_id: pick.rules_contract_id.clone(),
                 fields,
                 cursor: 0,
@@ -2692,7 +2657,7 @@ impl App {
                 let op = match composer.submit {
                     ComposerSubmit::Confirm => GovOp::Confirm {
                         action: payload,
-                        governance_type: composer.governance_type.clone(),
+                        governance_type: "core_self".to_owned(),
                         proposal_cid: None,
                     },
                     ComposerSubmit::Propose => GovOp::Propose { proposal: payload },
@@ -2701,7 +2666,6 @@ impl App {
                     op,
                     party_id: composer.party_id.clone(),
                     party_name: composer.party_name.clone(),
-                    governance_type: composer.governance_type.clone(),
                     rules_contract_id: composer.rules_contract_id.clone(),
                 }
             })
@@ -2886,15 +2850,14 @@ impl App {
         let Some(party) = self.detail.as_ref() else {
             return;
         };
-        let Some(governance_type) = party_governance_type(party) else {
+        if party_governance_type(party).is_none() {
             self.overlay =
                 Overlay::Message("This party has no governance rules contract.".to_owned());
             return;
-        };
+        }
         let _ = self.requests.send(Request::Governance {
             party_id: party.party_id.to_string(),
             party_name: party_name(party).to_owned(),
-            governance_type: governance_type.to_owned(),
         });
         self.overlay = Overlay::Busy("Loading governance approvals…".to_owned());
     }
@@ -2905,7 +2868,6 @@ impl App {
             op,
             party_id: view.party_id.clone(),
             party_name: view.party_name.clone(),
-            governance_type: view.governance_type.clone(),
             rules_contract_id: view.rules_contract_id.clone(),
         }
     }
@@ -2922,7 +2884,7 @@ impl App {
             let op = match item {
                 GovItem::OffChain(action) => GovOp::Confirm {
                     action: action.action.clone(),
-                    governance_type: view.governance_type.clone(),
+                    governance_type: "core_self".to_owned(),
                     proposal_cid: None,
                 },
                 GovItem::Domain(domain) => GovOp::Confirm {
@@ -2955,7 +2917,7 @@ impl App {
                             action.executable_confirmation_cids.as_deref(),
                             &action.confirmations,
                         ),
-                        governance_type: view.governance_type.clone(),
+                        governance_type: "core_self".to_owned(),
                         proposal_cid: None,
                     },
                 ),
@@ -2993,7 +2955,7 @@ impl App {
                 return;
             };
             let (confirmations, governance_type) = match item {
-                GovItem::OffChain(action) => (&action.confirmations, view.governance_type.clone()),
+                GovItem::OffChain(action) => (&action.confirmations, "core_self".to_owned()),
                 GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
             };
             confirmations
@@ -3031,7 +2993,7 @@ impl App {
                 return;
             };
             let (confirmations, governance_type) = match item {
-                GovItem::OffChain(action) => (&action.confirmations, view.governance_type.clone()),
+                GovItem::OffChain(action) => (&action.confirmations, "core_self".to_owned()),
                 GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
             };
             confirmations
@@ -3605,6 +3567,50 @@ mod tests {
         let cids = confirmation_cids(None, &confirmations);
 
         assert_eq!(cids, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    fn party_with_templates(templates: &[&str]) -> DecentralizedParty {
+        let mut party = party("gov");
+        party.contracts = templates
+            .iter()
+            .enumerate()
+            .map(|(i, template)| common::types::ContractInfo {
+                contract_id: format!("00c{i}"),
+                template_id: (*template).to_owned(),
+                package_id: "#pkg".to_owned(),
+                package_name: String::new(),
+                package_version: String::new(),
+                created_at: String::new(),
+            })
+            .collect();
+        party
+    }
+
+    /// The governance overlay, and so the composer, opens only for a party
+    /// this classifies. It never yields anything but core_self, which is why
+    /// the composer offers only the self-management actions.
+    #[test]
+    fn party_governance_type_is_core_self_or_none() {
+        let rules = "Governance.Rules:GovernanceRules";
+        assert_eq!(
+            party_governance_type(&party_with_templates(&[rules])),
+            Some("core_self")
+        );
+        assert_eq!(
+            party_governance_type(&party_with_templates(&[
+                "CBTC.Governance:CBTCGovernanceRules",
+                rules
+            ])),
+            Some("core_self")
+        );
+        for other in [
+            "CBTC.Governance:CBTCGovernanceRules",
+            "Governance:GovernanceRules",
+            "Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory",
+        ] {
+            assert_eq!(party_governance_type(&party_with_templates(&[other])), None);
+        }
+        assert_eq!(party_governance_type(&party_with_templates(&[])), None);
     }
 
     #[test]

@@ -115,16 +115,15 @@ pub fn make_empty_extra_args() -> Value {
     make_extra_args(make_empty_text_map())
 }
 
-/// Fallback timestamps for serializing a `Transfer` record when no explicit
-/// validity window is supplied (tests only — the propose handler always passes
-/// a real, bounded window). `0` is epoch and `i64::MAX / 1000` is the maximum
+/// Fallback `executeBefore` for serializing a `Transfer` record when no
+/// explicit validity window is supplied (tests only — the propose handler
+/// always passes a real, bounded window). `i64::MAX / 1000` is the maximum
 /// Daml `Time` value.
 ///
-/// These were the *production* values once, but an effectively-infinite
+/// This was the *production* value once, but an effectively-infinite
 /// `executeBefore` meant a two-step transfer offer the receiver never accepted
 /// locked the sender's holdings forever. Production now bounds the window via
 /// [`TransferValidity`]; see [`TRANSFER_VALIDITY_WINDOW_MICROS`].
-pub const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
 pub const TRANSFER_EXECUTE_BEFORE_MICROS: i64 = i64::MAX / 1000;
 
 /// How long a `Transfer` proposal (and, for two-step transfers, the resulting

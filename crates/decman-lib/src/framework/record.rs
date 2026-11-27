@@ -14,7 +14,7 @@
 //! * The **strict** family returns `Result<_, Error>` and is for callers that
 //!   want a decode failure to propagate: `field_party_id`, `field_decimal`,
 //!   `field_time`, `field_list_len`, `field_party_list`, `extract_party`,
-//!   `extract_party_id`, `extract_text`, `extract_int64`, `extract_numeric`,
+//!   `extract_party_id`, `extract_text`, `extract_int64`,
 //!   `extract_contract_id`, `extract_record`, `extract_list`, and `get_field`.
 //!   Every error is `Error::Decode`. An accessor that parses a value keeps
 //!   the parse error as the chained source, so `std::error::Error::source`
@@ -191,14 +191,6 @@ pub fn extract_int64(value: &Value) -> Result<i64, Error> {
     match &value.sum {
         Some(value::Sum::Int64(n)) => Ok(*n),
         _ => Err(Error::decode("Expected Int64 value")),
-    }
-}
-
-/// Read a `Numeric` value.
-pub fn extract_numeric(value: &Value) -> Result<String, Error> {
-    match &value.sum {
-        Some(value::Sum::Numeric(n)) => Ok(n.clone()),
-        _ => Err(Error::decode("Expected Numeric value")),
     }
 }
 

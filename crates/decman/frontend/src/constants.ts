@@ -18,11 +18,6 @@ export const zebraRow = (index: number) => ({
 });
 
 // Contract identifiers (package_ref:module:entity)
-export const TEMPLATE_ALLOCATION_FACTORY = {
-  package_ref: "#utility-registry-app-v0",
-  module: "Utility.Registry.App.V0.Service.AllocationFactory",
-  entity: "AllocationFactory",
-};
 export const TEMPLATE_AMULET = {
   package_ref: "#splice-amulet",
   module: "Splice.Amulet",

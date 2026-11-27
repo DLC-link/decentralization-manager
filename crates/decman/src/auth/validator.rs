@@ -71,22 +71,6 @@ impl Principal {
             Err(ValidationError::MissingRole(admin_role.to_string()))
         }
     }
-
-    /// Placeholder for per-party authorization. v1 is node-scoped: every
-    /// authenticated caller can operate any party on this node. When that
-    /// assumption breaks (first shared-node deployment), fill this body in
-    /// against a `party_members` table — no handler changes required.
-    ///
-    /// # Errors
-    ///
-    /// Currently infallible. Declared fallible so call sites stay correct
-    /// when the body is filled in later.
-    pub fn require_party_access(
-        &self,
-        _party_id: &crate::canton_id::CantonId,
-    ) -> Result<(), ValidationError> {
-        Ok(())
-    }
 }
 
 /// Inbound token validator. Enum rather than trait object to mirror the

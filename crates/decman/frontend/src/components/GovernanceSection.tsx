@@ -21,15 +21,10 @@ import {
   ListSubheader,
   Portal,
 } from "@mui/material";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import AddIcon from "@mui/icons-material/Add";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   API_BASE,
-  ADMIN_ACCESS,
-  TEMPLATE_ALLOCATION_FACTORY,
   TEMPLATE_AMULET,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
@@ -98,13 +93,18 @@ import type {
 
 type ActionTypeKey = ActionType["type"];
 
+// The proposal types the type menu offers. The API also accepts mint, burn
+// and provision_provider_service, but this form never builds them.
+type FormProposalType = Exclude<
+  ProposalType["type"],
+  "mint" | "burn" | "provision_provider_service"
+>;
+
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
-  governanceContractIds?: string[];
   defaultOperatorParty?: string;
   network?: Network;
-  governanceType?: "core_self" | "core_domain";
   /// Called after every successful mutating action (propose / confirm /
   /// execute / revoke / expire / domain confirm / domain execute) so the
   /// parent can refresh sibling views (e.g. the audit trail tab).
@@ -114,10 +114,9 @@ interface GovernanceSectionProps {
   /// fires after `onAfterAction` so refreshes still run.
   onProposalCreated?: () => void;
   /// Which half of the section to render:
-  /// - "actions"   = governance-action confirmations + new-action form (default)
-  /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
-  /// - undefined   = both (legacy, used when rendered inline on the party page)
-  view?: "actions" | "proposals";
+  /// - "actions"   = governance-action confirmations + new-action form
+  /// - "proposals" = domain-proposal list + new-proposal form
+  view: "actions" | "proposals";
   /// When provided, the inline Submit Confirmation / Submit Proposal button
   /// is rendered into this DOM node (via `Portal`) instead of inline at the
   /// bottom of the form. Used by `GovernanceActionsDialog` to lift the
@@ -149,28 +148,20 @@ const requiredClaimsText = (claims: { property: string; value: string }[]) =>
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
-  governanceContractIds = [],
   defaultOperatorParty,
   network,
-  governanceType = "core_self",
   onAfterAction,
   onProposalCreated,
   view,
   submitPortalEl,
 }: GovernanceSectionProps) => {
-  const showActionsHalf = view !== "proposals";
-  const showProposalsHalf = view !== "actions";
-  const [expanded, setExpanded] = useState(true);
+  const showActionsHalf = view === "actions";
+  const showProposalsHalf = view === "proposals";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   // Domain proposal state
-  // Auto-expand the form when this section is rendered in proposals-only mode
-  // (header "New Proposal" button); otherwise start collapsed.
-  const [showProposalForm, setShowProposalForm] = useState(
-    view === "proposals",
-  );
-  const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
+  const [proposalType, setProposalType] = useState<FormProposalType>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
   const [proposalDelegate, setProposalDelegate] = useState("");
@@ -252,8 +243,6 @@ export const GovernanceSection = ({
   const [proposalRevokeDelegationCid, setProposalRevokeDelegationCid] = useState("");
   const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
   const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
-  const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
-  const [proposalRecipient, setProposalRecipient] = useState("");
   const [proposalHolder, setProposalHolder] = useState("");
   // Credential proposal state (offer / accept, free and paid)
   const [proposalUserServiceCid, setProposalUserServiceCid] = useState("");
@@ -320,15 +309,8 @@ export const GovernanceSection = ({
   );
 
   // Action form state
-  // Auto-expand the action form when the section is rendered in actions-only
-  // mode (pencil icon → modal); otherwise start collapsed.
-  const [showNewActionForm, setShowNewActionForm] = useState(
-    view === "actions",
-  );
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
-    governanceType === "core_self"
-      ? "governance_add_member"
-      : "utility_create_provider_request",
+    "governance_add_member",
   );
   const [formLoading, setFormLoading] = useState(false);
 
@@ -351,34 +333,17 @@ export const GovernanceSection = ({
   // One party id per line. The action replaces the whole set, so it starts
   // from the current observers.
   const [disclosureObserversText, setDisclosureObserversText] = useState("");
-  // New fields for additional action types
-  const [operatorParty, setOperatorParty] = useState(
-    defaultOperatorParty || "",
-  );
-  // Sync the autofetched operator party (from App.tsx) into both the action
-  // and proposal operator states once it arrives — without this, the fields
-  // stay empty whenever the fetch completes after this component has already
-  // mounted with an empty default.
+  // Sync the autofetched operator party (from App.tsx) into the proposal
+  // operator state once it arrives — without this, the fields stay empty
+  // whenever the fetch completes after this component has already mounted
+  // with an empty default.
   useEffect(() => {
     if (defaultOperatorParty) {
-      setOperatorParty(defaultOperatorParty);
       setProposalOperator(defaultOperatorParty);
     }
   }, [defaultOperatorParty]);
-  const [providerServiceCid, setProviderServiceCid] = useState("");
-  const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState("");
   const [dsoPartyId, setDsoPartyId] = useState("");
-
-  // Utility onboarding fields
-  const [holderServiceRequestCid, setHolderServiceRequestCid] = useState("");
-  const [holderParty, setHolderParty] = useState("");
-
-  // Credential fields
-  const [credentialId, setCredentialId] = useState("");
-  const [credentialDescription, setCredentialDescription] = useState("");
-  const [credentialOfferCid, setCredentialOfferCid] = useState("");
-  const [claims, setClaims] = useState<Claim[]>([]);
 
   // Available services from ACS
   const [providerServices, setProviderServices] = useState<
@@ -457,11 +422,7 @@ export const GovernanceSection = ({
   });
   const [servicesLoading, setServicesLoading] = useState(false);
 
-  // Contracts fetched by template (with blobs)
-  const [allocationFactoryContracts, setAllocationFactoryContracts] = useState<ContractWithBlob[]>([]);
   const [amuletRulesLoading, setAmuletRulesLoading] = useState(false);
-
-  // Burn Mint Factory (from external API, used for processor deployment)
 
   // Update rulesContractId when prop changes
   useEffect(() => {
@@ -569,19 +530,11 @@ export const GovernanceSection = ({
       if (providerRes.ok) {
         const response: ProviderServicesResponse = await providerRes.json();
         setProviderServices(response.services);
-        // Auto-select first provider service
-        if (response.services.length > 0) {
-          setProviderServiceCid(response.services[0].contract_id);
-        }
       }
 
       if (userRes.ok) {
         const response: UserServicesResponse = await userRes.json();
         setUserServices(response.services);
-        // Auto-select first user service
-        if (response.services.length > 0) {
-          setUserServiceCid(response.services[0].contract_id);
-        }
       }
     } catch (e) {
       console.error("Failed to fetch services:", e);
@@ -590,19 +543,7 @@ export const GovernanceSection = ({
     }
   }, [partyId]);
 
-  // Fetch services when action type needs service selection
-  useEffect(() => {
-    if (
-      selectedActionType === "utility_setup" ||
-      selectedActionType === "utility_accept_holder_service_request" ||
-      selectedActionType === "credential_offer_free" ||
-      selectedActionType === "credential_accept_free"
-    ) {
-      fetchServices();
-    }
-  }, [selectedActionType, fetchServices]);
-
-  // Also fetch services when a proposal type that creates a service-request is
+  // Fetch services when a proposal type that creates a service-request is
   // selected — used to detect when the corresponding service already exists,
   // so the form can warn that the proposal would be a no-op.
   // SetupUtility additionally needs the ProviderService list to populate its
@@ -742,13 +683,12 @@ export const GovernanceSection = ({
 
   useEffect(() => {
     if (
-      selectedActionType === "credential_accept_free" ||
       proposalType === "accept_free_credential" ||
       proposalType === "accept_paid_credential"
     ) {
       fetchCredentialOffers();
     }
-  }, [selectedActionType, proposalType, fetchCredentialOffers]);
+  }, [proposalType, fetchCredentialOffers]);
 
   // Offers this party can take via the Free direction: it is the holder and
   // the offer carries no billing params (`CredentialOffer_AcceptFree` rejects
@@ -864,15 +804,10 @@ export const GovernanceSection = ({
     if (proposalType === "accept_free_credential" && !proposalCredentialOfferCid) {
       setProposalCredentialOfferCid(offerCid);
     }
-    if (selectedActionType === "credential_accept_free" && !credentialOfferCid) {
-      setCredentialOfferCid(offerCid);
-    }
   }, [
     proposalType,
-    selectedActionType,
     acceptableCredentialOffers,
     proposalCredentialOfferCid,
-    credentialOfferCid,
   ]);
 
   // The same prefill for the Accept Paid Credential form.
@@ -1100,8 +1035,6 @@ export const GovernanceSection = ({
   // Fetch instruments when a proposal type needs them
   useEffect(() => {
     if (
-      proposalType === "mint" ||
-      proposalType === "burn" ||
       proposalType === "accept_mint_request" ||
       proposalType === "accept_burn_request" ||
       proposalType === "set_provider_app_reward_beneficiaries" ||
@@ -1234,17 +1167,6 @@ export const GovernanceSection = ({
     }
   }, [selectedHoldingKey, transferHoldings, transferFactories]);
 
-  // Mint/Burn always use the decparty as the instrument admin — seed the field
-  // unconditionally so it's populated even before (or without) an Instrument
-  // selection from the dropdown. NOT applied to setup_token_preapproval or
-  // transfer because those can target foreign-issued instruments where the
-  // admin is a different party.
-  useEffect(() => {
-    if (proposalType === "mint" || proposalType === "burn") {
-      setProposalInstrumentIdAdmin(partyId);
-    }
-  }, [proposalType, partyId]);
-
   // The CreateUserServiceRequest / CreateProviderServiceRequest proposals
   // always use the dec party itself as the user / provider — the field
   // exists because the Daml choice still asks for it, but every operator
@@ -1306,12 +1228,8 @@ export const GovernanceSection = ({
     }
   }, [proposalType, fetchOwnAmulets]);
 
-  // Fetch AllocationFactory contracts when Mint/Burn proposal is selected.
-  // (set_enable_result_contracts needs RegistrarService instead.)
+  // Fetch the contract lists the selected proposal type needs.
   useEffect(() => {
-    if (proposalType === "mint" || proposalType === "burn") {
-      fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY).then(setAllocationFactoryContracts);
-    }
     if (proposalType === "set_enable_result_contracts") {
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
     }
@@ -1382,12 +1300,6 @@ export const GovernanceSection = ({
       setAmuletRulesLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    if (selectedActionType === "dev_net_feature_app") {
-      fetchNetworkInfo();
-    }
-  }, [selectedActionType, fetchNetworkInfo]);
 
   // Read the newest open mining round from scan for the Accept Paid
   // Credential form. Without DECPM_SCAN_URL the node answers 422, and the
@@ -1625,50 +1537,6 @@ export const GovernanceSection = ({
           disclosure_observers: observers.length > 0 ? observers : undefined,
         };
       }
-      case "utility_create_provider_request":
-        return {
-          type: "utility_create_provider_request",
-          operator: operatorParty,
-        };
-      case "utility_create_user_request":
-        return { type: "utility_create_user_request", operator: operatorParty };
-      case "utility_setup":
-        return {
-          type: "utility_setup",
-          operator: operatorParty,
-          provider_service_cid: providerServiceCid,
-          user_service_cid: userServiceCid,
-        };
-      case "utility_accept_holder_service_request":
-        return {
-          type: "utility_accept_holder_service_request",
-          operator: operatorParty,
-          provider_service_cid: providerServiceCid,
-          holder_service_request_cid: holderServiceRequestCid,
-          holder: holderParty,
-        };
-      case "credential_offer_free":
-        return {
-          type: "credential_offer_free",
-          operator: operatorParty,
-          user_service_cid: userServiceCid,
-          holder: holderParty,
-          id: credentialId,
-          description: credentialDescription,
-          claims,
-        };
-      case "credential_accept_free":
-        return {
-          type: "credential_accept_free",
-          operator: operatorParty,
-          user_service_cid: userServiceCid,
-          credential_offer_cid: credentialOfferCid,
-        };
-      case "dev_net_feature_app":
-        return {
-          type: "dev_net_feature_app",
-          amulet_rules_cid: amuletRulesCid,
-        };
       default:
         return null;
     }
@@ -1848,7 +1716,7 @@ export const GovernanceSection = ({
   // Clear the action form fields after a successful submit so the next
   // action starts blank — keeps the form expanded and the submit button
   // visible (the new action shows up in the notification queue on its own).
-  // NOTE: operatorParty / dsoPartyId / amuletRulesCid are intentionally NOT
+  // NOTE: dsoPartyId / amuletRulesCid are intentionally NOT
   // cleared — they're autofetched (or seeded once) and should persist across
   // submissions of the same dialog session.
   const resetActionForm = () => {
@@ -1869,14 +1737,6 @@ export const GovernanceSection = ({
     setTimeoutMicroseconds(
       governanceState?.action_confirmation_timeout_microseconds ?? 3600000000,
     );
-    setProviderServiceCid("");
-    setUserServiceCid("");
-    setHolderServiceRequestCid("");
-    setHolderParty("");
-    setCredentialId("");
-    setCredentialDescription("");
-    setCredentialOfferCid("");
-    setClaims([]);
   };
 
   const handleSubmitAction = async () => {
@@ -1905,7 +1765,7 @@ export const GovernanceSection = ({
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action,
-        governance_type: governanceType,
+        governance_type: "core_self",
       };
 
       const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
@@ -1939,7 +1799,7 @@ export const GovernanceSection = ({
   // the next one's payload. Fields prefilled from app or network state get
   // that value back rather than an empty string, because their fetches only
   // run once.
-  const resetProposalForm = (type: ProposalType["type"] = proposalType) => {
+  const resetProposalForm = (type: FormProposalType = proposalType) => {
     setProposalProvider(type === "create_provider_service_request" ? partyId : "");
     setProposalOperator(defaultOperatorParty || "");
     setProposalExpectedDso(dsoPartyId);
@@ -1953,7 +1813,7 @@ export const GovernanceSection = ({
     setProposalAmount("");
     setSelectedHoldingKey("");
     setShowTransferAdvanced(false);
-    setProposalInstrumentIdAdmin(type === "mint" || type === "burn" ? partyId : "");
+    setProposalInstrumentIdAdmin("");
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
     setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
@@ -1975,8 +1835,6 @@ export const GovernanceSection = ({
     setProposalRevokeDelegationCid("");
     setProposalRegistrarServiceCid("");
     setProposalEnableResultContracts("true");
-    setProposalAllocationFactoryCid("");
-    setProposalRecipient("");
     setProposalHolder("");
     setProposalUserServiceCid("");
     setProposalCredentialId("");
@@ -2142,9 +2000,6 @@ export const GovernanceSection = ({
             description: proposalDescription,
           };
           break;
-        case "provision_provider_service":
-          proposal = { type: "provision_provider_service" };
-          break;
         case "setup_utility":
           proposal = {
             type: "setup_utility",
@@ -2282,32 +2137,6 @@ export const GovernanceSection = ({
           };
           break;
         }
-        // The type menu hides Mint and Burn, so their forms have no shard
-        // picker and send no block list shards.
-        case "mint":
-          proposal = {
-            type: "mint",
-            allocation_factory_cid: proposalAllocationFactoryCid,
-            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            recipient: proposalRecipient,
-            amount: proposalAmount,
-            description: proposalDescription,
-            block_list_shard_cids: [],
-          };
-          break;
-        case "burn":
-          proposal = {
-            type: "burn",
-            allocation_factory_cid: proposalAllocationFactoryCid,
-            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            holder: proposalHolder,
-            amount: proposalAmount,
-            description: proposalDescription,
-            block_list_shard_cids: [],
-          };
-          break;
         case "accept_mint_request":
           if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
             throw new Error("Pick at least one Block List Shard");
@@ -2530,9 +2359,8 @@ export const GovernanceSection = ({
   };
 
   // Render form fields based on selected action type
-  // Shared by the legacy DevNet Feature App action form and the Request DevNet
-  // Featured App Right and Accept Paid Credential proposal forms: all pin the
-  // DSO's current AmuletRules.
+  // Shared by the Request DevNet Featured App Right and Accept Paid Credential
+  // proposal forms: both pin the DSO's current AmuletRules.
   const renderAmuletRulesCidField = () => (
     <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
       <TextField
@@ -2751,468 +2579,6 @@ export const GovernanceSection = ({
             }}
           />
         );
-      case "utility_create_provider_request":
-      case "utility_create_user_request":
-        return (
-          <TextField
-            label="Operator Party"
-            value={operatorParty}
-            onChange={(e) => setOperatorParty(e.target.value)}
-            size="small"
-            fullWidth
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Party id of the utility operator that will sign off on this onboarding request.",
-                  "Help for Operator Party",
-                ),
-              },
-            }}
-          />
-        );
-      case "utility_setup":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator setting up the registrar service.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="ProviderService contract this party already has from the operator.">
-                    Provider Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={providerServiceCid}
-                  label="Provider Service"
-                  onChange={(e) => setProviderServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : providerServices.length > 0 ? (
-                    providerServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No provider services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract this party already has from the operator.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-          </>
-        );
-      case "utility_accept_holder_service_request":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator that issued the ProviderService.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="ProviderService contract this party will exercise to accept the holder's request.">
-                    Provider Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={providerServiceCid}
-                  label="Provider Service"
-                  onChange={(e) => setProviderServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : providerServices.length > 0 ? (
-                    providerServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No provider services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <TextField
-              label="Holder Service Request Contract ID"
-              value={holderServiceRequestCid}
-              onChange={(e) => setHolderServiceRequestCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Contract id of the pending HolderServiceRequest that this proposal will accept.",
-                    "Help for Holder Service Request Contract ID",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Holder Party"
-              value={holderParty}
-              onChange={(e) => setHolderParty(e.target.value)}
-              size="small"
-              fullWidth
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the holder whose service request is being accepted.",
-                    "Help for Holder Party",
-                  ),
-                },
-              }}
-            />
-          </>
-        );
-      case "credential_offer_free":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator the user service is registered with.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract that will issue the credential offer.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <TextField
-              label="Holder Party"
-              value={holderParty}
-              onChange={(e) => setHolderParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id that will receive the credential offer.",
-                    "Help for Holder Party",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Credential ID"
-              value={credentialId}
-              onChange={(e) => setCredentialId(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Unique identifier for this credential (free-form string).",
-                    "Help for Credential ID",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Credential Description"
-              value={credentialDescription}
-              onChange={(e) => setCredentialDescription(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Free-form human-readable description of what this credential certifies.",
-                    "Help for Credential Description",
-                  ),
-                },
-              }}
-            />
-            <Typography variant="caption" color="text.secondary">
-              <TextHelp text="Statements baked into the credential. Each row is a (subject, property, value) triple.">
-                Claims
-              </TextHelp>
-            </Typography>
-            {claims.map((claim, idx) => (
-              <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                <TextField
-                  label="Subject"
-                  value={claim.subject}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, subject: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "What this claim is about (e.g. the holder party id).",
-                        "Help for Subject",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  label="Property"
-                  value={claim.property}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, property: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Attribute name being asserted (e.g. \"kyc_verified\").",
-                        "Help for Property",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  label="Value"
-                  value={claim.value}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, value: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Value of the property (e.g. \"true\" or a region code).",
-                        "Help for Value",
-                      ),
-                    },
-                  }}
-                />
-                <Button
-                  size="small"
-                  color="error"
-                  onClick={() => setClaims(claims.filter((_, i) => i !== idx))}
-                >
-                  Remove
-                </Button>
-              </Box>
-            ))}
-            <Button
-              size="small"
-              onClick={() =>
-                setClaims([...claims, { subject: "", property: "", value: "" }])
-              }
-            >
-              Add Claim
-            </Button>
-          </>
-        );
-      case "credential_accept_free":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator the user service is registered with.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract that will accept the credential offer on this party's behalf.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={() => {
-                      fetchServices();
-                      fetchCredentialOffers();
-                    }}
-                    disabled={servicesLoading || credentialOffersLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            {renderCredentialOfferAutocomplete(
-              credentialOfferCid,
-              setCredentialOfferCid,
-            )}
-          </>
-        );
-      case "dev_net_feature_app":
-        return renderAmuletRulesCidField();
       default:
         return null;
     }
@@ -3240,34 +2606,7 @@ export const GovernanceSection = ({
 
       {showActionsHalf && (
       <>
-      {view !== "actions" && (
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            cursor: "pointer",
-            mb: 1,
-          }}
-          onClick={() => setExpanded(!expanded)}
-        >
-          <IconButton size="small">
-            {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-          </IconButton>
-          <Typography variant="subtitle2">
-            Governance Actions
-            {data && data.actions.length > 0 && (
-              <Chip
-                label={data.actions.length}
-                size="small"
-                sx={{ ml: 1 }}
-                color="primary"
-              />
-            )}
-          </Typography>
-        </Box>
-      )}
-
-      <Collapse in={expanded}>
+      <Collapse in>
         {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             The governance core contract is out of date
@@ -3279,65 +2618,10 @@ export const GovernanceSection = ({
           </Alert>
         )}
 
-        {view !== "actions" && (
-        <Box sx={{ mb: 2 }}>
-          <Autocomplete
-            freeSolo
-            options={governanceContractIds}
-            value={rulesContractId}
-            onChange={(_e, value) => setRulesContractId(value || "")}
-            onInputChange={(_e, value) => setRulesContractId(value)}
-            disabled={!ADMIN_ACCESS}
-            size="small"
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label={
-                  <TextHelp text="Contract id of the GovernanceRules contract that all new actions will target. Defaults to this party's active rules.">
-                    Governance Contract ID
-                  </TextHelp>
-                }
-                placeholder="Enter or select contract ID"
-              />
-            )}
-          />
-        </Box>
-        )}
-
         {/* New Action Form */}
         <Box sx={{ mb: 2 }}>
-          {view !== "actions" && (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
-              onClick={() => setShowNewActionForm(!showNewActionForm)}
-              disabled={!ADMIN_ACCESS || !rulesContractId}
-            >
-              {showNewActionForm ? "Hide Form" : "New Governance Action"}
-            </Button>
-          )}
-
-          <Collapse in={showNewActionForm}>
-            <Box
-              sx={
-                view === "actions"
-                  ? {}
-                  : {
-                      mt: 2,
-                      p: 2,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      borderRadius: 1,
-                    }
-              }
-            >
-              {view !== "actions" && (
-                <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                  Create New Governance Action
-                </Typography>
-              )}
-
+          <Collapse in>
+            <Box>
               <FormControl fullWidth size="small" sx={{ mb: 2 }}>
                 <InputLabel>
                   <TextHelp text="What kind of governance action to create. The fields below adapt to the selected type.">
@@ -3353,13 +2637,9 @@ export const GovernanceSection = ({
                   MenuProps={{ disableScrollLock: true }}
                 >
                   {getActionTypeOptions(network).filter((opt) => {
-                    if (opt.hidden && governanceType !== "core_self") return false;
-                    if (governanceType === "core_self") {
-                      // For governance-core, only show self-management actions
-                      const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout", "governance_set_disclosure_observers"];
-                      return selfActions.includes(opt.value);
-                    }
-                    return !opt.hidden;
+                    // For governance-core, only show self-management actions
+                    const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout", "governance_set_disclosure_observers"];
+                    return selfActions.includes(opt.value);
                   }).map(
                     (opt) => (
                       <MenuItem key={opt.value} value={opt.value}>
@@ -3407,14 +2687,6 @@ export const GovernanceSection = ({
                 ) : (
                   <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
                     {inlineSubmitBtn}
-                    {view !== "actions" && (
-                      <Button
-                        variant="outlined"
-                        onClick={() => setShowNewActionForm(false)}
-                      >
-                        Cancel
-                      </Button>
-                    )}
                   </Box>
                 );
               })()}
@@ -3427,37 +2699,10 @@ export const GovernanceSection = ({
       )}
 
       {/* Proposals — only for governance-core */}
-      {showProposalsHalf && governanceType === "core_self" && data && (
-        <Box sx={view === "proposals" ? {} : { mt: 2, mx: -2 }}>
-          {view !== "proposals" && (
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
-              <Typography variant="subtitle2">
-                Proposals
-                {(data.domain_actions?.length ?? 0) > 0 && (
-                  <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
-                )}
-              </Typography>
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={() => {
-                  if (!showProposalForm && !dsoPartyId) fetchNetworkInfo();
-                  setShowProposalForm(!showProposalForm);
-                }}
-              >
-                {showProposalForm ? "Cancel" : "New Proposal"}
-              </Button>
-            </Box>
-          )}
-
-          <Collapse in={showProposalForm}>
-            <Box
-              sx={
-                view === "proposals"
-                  ? { display: "flex", flexDirection: "column", gap: 1.5 }
-                  : { display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }
-              }
-            >
+      {showProposalsHalf && data && (
+        <Box>
+          <Collapse in>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
               <FormControl size="small" fullWidth>
                 <InputLabel>
                   <TextHelp text="What kind of proposal to create. The form fields below adapt to the selected type.">
@@ -3468,7 +2713,7 @@ export const GovernanceSection = ({
                   value={proposalType}
                   label="Proposal Type"
                   onChange={(e) => {
-                    const next = e.target.value as ProposalType["type"];
+                    const next = e.target.value as FormProposalType;
                     if (next !== proposalType) resetProposalForm(next);
                     setProposalType(next);
                   }}
@@ -3493,13 +2738,6 @@ export const GovernanceSection = ({
                   <MenuItem value="update_instrument_configuration">Update Instrument Configuration</MenuItem>
                   <MenuItem value="create_transfer_rule">Create Transfer Rule</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
-                  {/*
-                  Hidden per Notion "Clean up Utility Plugin" task — keep the
-                  ProposalType variant + form field + submit handler wired so
-                  existing API consumers still work; just not surfaced in the
-                  dropdown for now.
-                  <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
-                  */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
@@ -4034,12 +3272,6 @@ export const GovernanceSection = ({
                     />
                   )}
                 />
-              )}
-
-              {proposalType === "provision_provider_service" && (
-                <Typography variant="caption" color="text.secondary">
-                  Provisions a Utility-Registry ProviderService with operator = proposer and provider = governance party. No parameters required.
-                </Typography>
               )}
 
               {proposalType === "setup_utility" && (
@@ -4766,133 +3998,6 @@ export const GovernanceSection = ({
                     },
                   }}
                 />
-              )}
-
-              {(proposalType === "mint" || proposalType === "burn") && (
-                <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp
-                        text={
-                          proposalType === "mint"
-                            ? "Instrument being minted. The governance party is the issuer."
-                            : "Instrument being burned. The governance party is the issuer."
-                        }
-                      >
-                        Instrument
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="Instrument"
-                      value={proposalInstrumentConfigurationCid}
-                      onChange={(e) => {
-                        const cid = e.target.value;
-                        const inst = availableInstruments.find(
-                          (i) => i.contract_id === cid,
-                        );
-                        setProposalInstrumentConfigurationCid(cid);
-                        // instrument_admin is always the decparty (seeded by
-                        // the effect above) — only `id` comes from the picked
-                        // instrument.
-                        if (inst) {
-                          setProposalInstrumentIdId(inst.instrument_id);
-                        }
-                      }}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {instrumentsLoading ? (
-                        <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : availableInstruments.length > 0 ? (
-                        availableInstruments.map((inst) => (
-                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No instruments found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="AllocationFactory contract used to allocate the new holding.">
-                        AllocationFactory
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="AllocationFactory"
-                      value={proposalAllocationFactoryCid}
-                      onChange={(e) => setProposalAllocationFactoryCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {allocationFactoryContracts.length > 0 ? (
-                        allocationFactoryContracts.map((c) => (
-                          <MenuItem key={c.contract_id} value={c.contract_id}>
-                            {c.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No AllocationFactory found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <TextField
-                    size="small"
-                    label={proposalType === "mint" ? "Recipient Party" : "Holder Party"}
-                    value={proposalType === "mint" ? proposalRecipient : proposalHolder}
-                    onChange={(e) => proposalType === "mint" ? setProposalRecipient(e.target.value) : setProposalHolder(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          proposalType === "mint"
-                            ? "Party id that will receive the newly minted tokens."
-                            : "Party id whose tokens will be burned.",
-                          proposalType === "mint" ? "Help for Recipient Party" : "Help for Holder Party",
-                        ),
-                      },
-                    }}
-                  />
-                  <TextField
-                    size="small"
-                    label="Amount"
-                    value={proposalAmount}
-                    onChange={(e) => setProposalAmount(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          proposalType === "mint"
-                            ? "How much of the selected instrument to mint."
-                            : "How much of the selected instrument to burn.",
-                          "Help for Amount",
-                        ),
-                      },
-                    }}
-                  />
-                  <TextField
-                    size="small"
-                    label="Description"
-                    value={proposalDescription}
-                    onChange={(e) => setProposalDescription(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Free-form human-readable note explaining why this mint or burn is being proposed.",
-                          "Help for Description",
-                        ),
-                      },
-                    }}
-                  />
-                </>
               )}
 
               {(proposalType === "accept_mint_request" || proposalType === "accept_burn_request") && (() => {

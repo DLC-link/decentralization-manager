@@ -22,8 +22,8 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     server::{
-        HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
-        WorkflowProgress, WorkflowRole, WorkflowRun,
+        HandledInvitation, InvitationOutcome, PendingInvitation, WorkflowKind, WorkflowProgress,
+        WorkflowRole, WorkflowRun,
     },
 };
 
@@ -147,23 +147,6 @@ impl SchemaRead for SqlitePool {
             .await?;
 
         rows.into_iter().map(|r| r.into_domain()).collect()
-    }
-
-    async fn get_peer(&self, participant_id: &str) -> Result<Option<Peer>> {
-        let row = sqlx::query_as::<_, PeerRow>("SELECT * FROM peers WHERE participant_id = ?")
-            .bind(participant_id)
-            .fetch_optional(self)
-            .await?;
-
-        row.map(|r| r.into_domain()).transpose()
-    }
-
-    async fn get_peer_count(&self) -> Result<i64> {
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM peers")
-            .fetch_one(self)
-            .await?;
-
-        Ok(count.0)
     }
 
     async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>> {
@@ -290,20 +273,6 @@ impl SchemaRead for SqlitePool {
         .fetch_optional(self)
         .await?;
         Ok(row.and_then(|(k,)| k))
-    }
-
-    async fn get_dec_party_contracts(
-        &self,
-        party_id: &CantonId,
-    ) -> Result<Vec<DecPartyContractRow>> {
-        let rows = sqlx::query_as::<_, DecPartyContractRow>(
-            "SELECT * FROM dec_party_contract WHERE dec_party_id = ?",
-        )
-        .bind(party_id.to_string())
-        .fetch_all(self)
-        .await?;
-
-        Ok(rows)
     }
 
     async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<DecPartyOwnerRow>> {
@@ -1434,25 +1403,6 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
-    async fn delete_pending_invitations_by_type_and_coordinator(
-        &mut self,
-        invitation_type: InvitationType,
-        coordinator_pubkey: &str,
-    ) -> Result {
-        sqlx::query(
-            r"
-            DELETE FROM pending_invitations
-            WHERE invitation_type = ? AND coordinator_pubkey = ? AND status = 'pending'
-            ",
-        )
-        .bind(invitation_type.to_string())
-        .bind(coordinator_pubkey)
-        .execute(&mut **self)
-        .await?;
-
-        Ok(())
-    }
-
     async fn mark_invitation_handled(
         &mut self,
         id: &str,
@@ -2269,34 +2219,19 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_insert_and_get_peers(pool: SqlitePool) -> Result {
-        assert_eq!(pool.get_peer_count().await?, 0);
+        assert_eq!(pool.get_all_peers().await?.len(), 0);
 
         let mut tx = pool.begin_transaction().await?;
         tx.insert_peer(&test_peer(1)).await?;
         tx.insert_peer(&test_peer(2)).await?;
         Commitable::commit(tx).await?;
 
-        assert_eq!(pool.get_peer_count().await?, 2);
+        assert_eq!(pool.get_all_peers().await?.len(), 2);
 
         let peers = pool.get_all_peers().await?;
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].name, "Node 1");
         assert_eq!(peers[1].port, 9002);
-
-        Ok(())
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_get_peer_by_id(pool: SqlitePool) -> Result {
-        let peer = test_peer(1);
-        let id = peer.participant_id.to_string();
-
-        let mut tx = pool.begin_transaction().await?;
-        tx.insert_peer(&peer).await?;
-        Commitable::commit(tx).await?;
-
-        assert!(pool.get_peer(&id).await?.is_some());
-        assert!(pool.get_peer("nonexistent::1220bb").await?.is_none());
 
         Ok(())
     }
@@ -2324,13 +2259,13 @@ mod tests {
         tx.insert_peer(&test_peer(2)).await?;
         Commitable::commit(tx).await?;
 
-        assert_eq!(pool.get_peer_count().await?, 2);
+        assert_eq!(pool.get_all_peers().await?.len(), 2);
 
         let mut tx = pool.begin_transaction().await?;
         tx.delete_all_peers().await?;
         Commitable::commit(tx).await?;
 
-        assert_eq!(pool.get_peer_count().await?, 0);
+        assert_eq!(pool.get_all_peers().await?.len(), 0);
 
         Ok(())
     }
@@ -2988,7 +2923,7 @@ mod tests {
             .await?;
         Commitable::commit(tx).await?;
 
-        let result = pool.get_dec_party_contracts(&party_id).await?;
+        let result = pool.get_all_dec_party_contracts("net-a").await?;
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].template_id, "Governance:GovernanceRules");
 
@@ -3032,7 +2967,7 @@ mod tests {
 
         assert_eq!(pool.get_dec_party_owners(&party_id).await?.len(), 1);
         assert_eq!(pool.get_dec_party_participants(&party_id).await?.len(), 1);
-        assert_eq!(pool.get_dec_party_contracts(&party_id).await?.len(), 1);
+        assert_eq!(pool.get_all_dec_party_contracts("net-a").await?.len(), 1);
 
         let mut tx = pool.begin_transaction().await?;
         tx.delete_dec_parties_by_prefix("net-a").await?;
@@ -3041,7 +2976,14 @@ mod tests {
         assert!(pool.get_dec_parties_by_prefix("net-a").await?.is_empty());
         assert!(pool.get_dec_party_owners(&party_id).await?.is_empty());
         assert!(pool.get_dec_party_participants(&party_id).await?.is_empty());
-        assert!(pool.get_dec_party_contracts(&party_id).await?.is_empty());
+        // Count the child rows directly: the bulk getter joins `dec_party`,
+        // so it would read empty even if the contract rows stayed behind.
+        let (contracts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM dec_party_contract WHERE dec_party_id = ?")
+                .bind(&party_id_str)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(contracts, 0);
 
         Ok(())
     }
@@ -3692,11 +3634,6 @@ mod tests {
 
         let mut tx = pool.begin_transaction().await?;
         tx.delete_pending_invitation("a").await?;
-        tx.delete_pending_invitations_by_type_and_coordinator(
-            InvitationType::Onboarding,
-            "coord-1",
-        )
-        .await?;
         tx.delete_pending_invitations_by_coordinator("coord-1")
             .await?;
         Commitable::commit(tx).await?;
@@ -4347,7 +4284,8 @@ mod tests {
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
         tx.upsert_dec_party(&test_dec_party("net-b")).await?;
 
-        // net-a: 2 owners, 1 participant. net-b: 1 owner, 2 participants.
+        // net-a: 2 owners, 1 participant, 1 contract. net-b: 1 owner,
+        // 2 participants, 2 contracts.
         tx.replace_dec_party_owners(
             &party_a,
             &["a-owner-1".to_string(), "a-owner-2".to_string()],
@@ -4387,6 +4325,26 @@ mod tests {
             ],
         )
         .await?;
+
+        let contract = |party: &str, contract_id: &str| DecPartyContractRow {
+            dec_party_id: party.to_string(),
+            contract_id: contract_id.to_string(),
+            template_id: "Governance.Rules:GovernanceRules".to_string(),
+            package_id: "#gov-core".to_string(),
+            package_name: "governance-core".to_string(),
+            package_version: "0.1.0".to_string(),
+            created_at: "2026-04-28T11:07:59.073177Z".to_string(),
+        };
+        tx.replace_dec_party_contracts(&party_a, &[contract(&party_a_str, "a-c1")])
+            .await?;
+        tx.replace_dec_party_contracts(
+            &party_b,
+            &[
+                contract(&party_b_str, "b-c1"),
+                contract(&party_b_str, "b-c2"),
+            ],
+        )
+        .await?;
         Commitable::commit(tx).await?;
 
         // Empty prefix → every JOIN-matched row across both parties.
@@ -4417,83 +4375,29 @@ mod tests {
         assert_eq!(b_participants.len(), 2);
         assert!(b_participants.iter().all(|p| p.dec_party_id == party_b_str));
 
-        Ok(())
-    }
-
-    // ====================================================================
-    // delete_pending_invitations_by_type_and_coordinator
-    // ====================================================================
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_delete_pending_invitations_by_type_and_coordinator(pool: SqlitePool) -> Result {
-        let coordinator = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-
-        // Two invites from the SAME coordinator, DIFFERENT invitation_type.
-        let onboarding = PendingInvitation {
-            id: "onboarding-eeeeeeeeeeeeeeee".to_string(),
-            invitation_type: InvitationType::Onboarding,
-            coordinator_pubkey: coordinator.clone(),
-            coordinator_name: None,
-            received_at: 1000,
-            prefix: Some("my-party".to_string()),
-            participants: Vec::new(),
-            dar_filenames: Vec::new(),
-            dar_hashes: Vec::new(),
-            kicked_participant: None,
-            kicked_owner_key: None,
-            rotated_key: None,
-            new_participant: None,
-            new_threshold: None,
-            previous_threshold: None,
-            confirmation_threshold: None,
-            dec_party_id: None,
-            package_names: Vec::new(),
-            contract_intents: Vec::new(),
-            workflow_instance: None,
+        // The party list reads contracts only through this bulk getter.
+        let contract_ids = |rows: &[DecPartyContractRow]| {
+            let mut ids: Vec<_> = rows
+                .iter()
+                .map(|c| (c.dec_party_id.clone(), c.contract_id.clone()))
+                .collect();
+            ids.sort();
+            ids
         };
-        let dars = PendingInvitation {
-            id: "dars-eeeeeeeeeeeeeeee".to_string(),
-            invitation_type: InvitationType::Dars,
-            coordinator_pubkey: coordinator.clone(),
-            coordinator_name: None,
-            received_at: 2000,
-            prefix: None,
-            participants: Vec::new(),
-            dar_filenames: vec!["app.dar".to_string()],
-            dar_hashes: Vec::new(),
-            kicked_participant: None,
-            kicked_owner_key: None,
-            rotated_key: None,
-            new_participant: None,
-            new_threshold: None,
-            previous_threshold: None,
-            confirmation_threshold: None,
-            dec_party_id: None,
-            package_names: Vec::new(),
-            contract_intents: Vec::new(),
-            workflow_instance: None,
-        };
-
-        let mut tx = pool.begin_transaction().await?;
-        tx.upsert_pending_invitation(&onboarding).await?;
-        tx.upsert_pending_invitation(&dars).await?;
-        Commitable::commit(tx).await?;
-        assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
-
-        // Delete only the Onboarding type → the Dars invite from the same
-        // coordinator must survive (proves the `AND invitation_type` clause).
-        let mut tx = pool.begin_transaction().await?;
-        tx.delete_pending_invitations_by_type_and_coordinator(
-            InvitationType::Onboarding,
-            &coordinator,
-        )
-        .await?;
-        Commitable::commit(tx).await?;
-
-        let remaining = pool.get_all_pending_invitations().await?;
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, dars.id);
-        assert_eq!(remaining[0].invitation_type, InvitationType::Dars);
+        let all_contracts = pool.get_all_dec_party_contracts("").await?;
+        assert_eq!(all_contracts.len(), 3);
+        assert_eq!(
+            contract_ids(&pool.get_all_dec_party_contracts("net-a").await?),
+            vec![(party_a_str.clone(), "a-c1".to_string())]
+        );
+        assert_eq!(
+            contract_ids(&pool.get_all_dec_party_contracts("net-b").await?),
+            vec![
+                (party_b_str.clone(), "b-c1".to_string()),
+                (party_b_str.clone(), "b-c2".to_string()),
+            ]
+        );
+        assert!(pool.get_all_dec_party_contracts("net-c").await?.is_empty());
 
         Ok(())
     }

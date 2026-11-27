@@ -96,25 +96,6 @@ export const LoadingSkeleton = () => (
   </Box>
 );
 
-export const PackagesTabSkeleton = () => (
-  <>
-    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
-      <Skeleton variant="text" width="200px" height={20} />
-      <Box sx={{ display: "flex", gap: 1 }}>
-        <Skeleton variant="rounded" width={140} height={32} />
-        <Skeleton variant="rounded" width={120} height={32} />
-      </Box>
-    </Box>
-    {Array.from({ length: 8 }).map((_, i) => (
-      <Box key={i} sx={{ display: "flex", gap: 2, py: 1.5, px: 1 }}>
-        <Skeleton variant="text" width="35%" />
-        <Skeleton variant="text" width="15%" />
-        <Skeleton variant="text" width="40%" />
-      </Box>
-    ))}
-  </>
-);
-
 export const ConfigTabSkeleton = () => (
   <>
     <Skeleton variant="text" width="60px" height={16} sx={{ mb: 1 }} />

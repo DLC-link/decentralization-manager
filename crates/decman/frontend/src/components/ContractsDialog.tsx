@@ -55,7 +55,6 @@ interface ContractsDialogProps {
   defaultOperatorParty?: string;
   knownPackageIds?: string[];
   deployedContracts?: ContractInfo[];
-  vettedPackages?: VettedPackageInfo[];
 }
 
 type ContractType = "governance-core" | "cbtc" | null;
@@ -1304,9 +1303,8 @@ export const ContractsDialog = ({
   defaultOperatorParty,
   knownPackageIds = [],
   deployedContracts = [],
-  vettedPackages: initialVettedPackages = [],
 }: ContractsDialogProps) => {
-  const [vettedPackages, setVettedPackages] = useState(initialVettedPackages);
+  const [vettedPackages, setVettedPackages] = useState<VettedPackageInfo[]>([]);
   const [vettedPackagesError, setVettedPackagesError] = useState<string | null>(
     null,
   );

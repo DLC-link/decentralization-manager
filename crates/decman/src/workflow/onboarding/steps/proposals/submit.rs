@@ -408,8 +408,7 @@ fn ensure_owner_threshold_signed(
 }
 
 /// Decode multiple consecutive `varint(len)||proto` messages from a single
-/// payload. Mirrors `utils::read_all_messages_from_file` but operates on
-/// in-memory bytes instead of a file path.
+/// payload.
 fn decode_messages_from_bytes<M: prost::Message + Default>(payload: &[u8]) -> Result<Vec<M>> {
     let mut cursor: &[u8] = payload;
     let mut out = Vec::new();
