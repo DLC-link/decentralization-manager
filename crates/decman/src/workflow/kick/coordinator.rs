@@ -11,6 +11,7 @@ use crate::{
     workflow::{
         signature_pairs::save_signature_pairs,
         storage::{WorkflowStorage, artifact_kinds},
+        write_topology,
     },
 };
 
@@ -56,6 +57,7 @@ pub async fn start_coordinator(
         let kick_config = kick_config.clone();
         let db = db.clone();
         let instance_name = kick_config.instance_name.clone();
+        let instance = instance.clone();
 
         tokio::spawn(async move {
             let mut coordinator_completed_steps = HashSet::new();
@@ -124,8 +126,12 @@ pub async fn start_coordinator(
                         )
                         .await?;
 
-                        let (confirmed_version, confirmed_thresholds) =
-                            submit_kick(&node_config, &db, &instance_name).await?;
+                        let (confirmed_version, confirmed_thresholds) = write_topology(
+                            &db,
+                            &instance,
+                            submit_kick(&node_config, &db, &instance_name),
+                        )
+                        .await?;
                         // Deliberately not fatal. The kick is durable at this
                         // point, so failing the step would leave the workflow
                         // on SubmitKick and a resume would resubmit the same
@@ -153,8 +159,10 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     KickStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
+                            &db,
+                            &instance,
                             &kick_config.decentralized_party_id,
                         )
                         .await?;
@@ -179,4 +187,165 @@ pub async fn start_coordinator(
         coordinator_workflow,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use sqlx::SqlitePool;
+    use tokio::{sync::RwLock, task::JoinHandle};
+
+    use super::*;
+    use crate::{
+        canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
+        db::MIGRATOR,
+        noise::NoiseKeypair,
+        server::{WorkflowKind, WorkflowRole},
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode},
+        },
+        workflow::state::WorkflowStep,
+    };
+
+    const RUN: &str = "kick-run";
+
+    /// Bounds a wait that only a failing run reaches.
+    const FAIL_AFTER: Duration = Duration::from_secs(10);
+
+    /// A coordinator for a kick that waits at the legacy key retirement, the
+    /// first step that writes topology. `fake` holds the party that retirement
+    /// would change.
+    struct KickAtRetirement {
+        fake: FakeAdminApi,
+        _node: TestNode,
+        instance: Arc<WorkflowInstance>,
+        driver: JoinHandle<Result>,
+    }
+
+    async fn start_kick_at_retirement(db: SqlitePool) -> Result<KickAtRetirement> {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = CantonId::new("party".to_string(), Namespace::new([7; NAMESPACE_LENGTH]));
+        fake.publish_party_awaiting_key_retirement(&party);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        tokio::fs::create_dir_all(node.config.data_dir()).await?;
+        NoiseKeypair::generate()
+            .save_to_file(node.config.key_file_path())
+            .await?;
+
+        let kick_config = KickConfig::new(
+            party,
+            None,
+            "fingerprint".to_string(),
+            1,
+            None,
+            2,
+            RUN.to_string(),
+        );
+        let step = KickStep::RetireLegacyKeys;
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES (?, 'Kick', 'Coordinator', 'inprogress', ?, ?, ?, ?, '[]', '[]', 0, 0)",
+        )
+        .bind(RUN)
+        .bind(step.step_name())
+        .bind(step.step_index())
+        .bind(KickStep::step_total())
+        .bind(serde_json::to_string(&kick_config)?)
+        .execute(&db)
+        .await?;
+
+        let instance = WorkflowInstance::new(
+            RUN.to_string(),
+            WorkflowKind::Kick,
+            WorkflowRole::Coordinator,
+        );
+        let driver = tokio::spawn(start_coordinator(
+            node.config.clone(),
+            NetworkConfig::default(),
+            kick_config,
+            db,
+            Arc::new(RwLock::new(HashMap::new())),
+            instance.clone(),
+        ));
+        // The driver registers the run's Noise handle right after it starts
+        // the coordinator loop, which is the loop's first moment to run.
+        while instance.active.read().is_ok_and(|active| active.is_none()) {
+            tokio::task::yield_now().await;
+        }
+        Ok(KickAtRetirement {
+            fake,
+            _node: node,
+            instance,
+            driver,
+        })
+    }
+
+    /// Cancelling a run aborts the task that drives it. A kick that is at the
+    /// legacy key retirement then must write no topology. Before the loop
+    /// stopped with its driver, it went on to sign the removal.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_aborted_kick_run_signs_no_topology(db: SqlitePool) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+
+        run.driver.abort();
+        assert!(run.driver.await.is_err_and(|e| e.is_cancelled()));
+        // The loop holds the only other handle on the run. The count drops to
+        // one when the loop stops, so after that no signature can come.
+        tokio::time::timeout(FAIL_AFTER, async {
+            while Arc::strong_count(&run.instance) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the coordinator loop outlived its aborted run"))?;
+
+        assert!(
+            run.fake.authorized().is_empty(),
+            "the kick signed topology after its run was aborted"
+        );
+        Ok(())
+    }
+
+    /// The control for the test above: the same run, left alone, signs the
+    /// removal. Without it, the quiet window could pass for a loop that never
+    /// reached the signing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_run_that_is_not_aborted_signs_the_removal(db: SqlitePool) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+
+        tokio::time::timeout(FAIL_AFTER, run.fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the kick never signed the removal"))?;
+        run.driver.abort();
+        Ok(())
+    }
+
+    /// The run's topology write lock is free while the coordinator waits for
+    /// the other members to finish the retirement, so the operator can still
+    /// cancel then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_write_lock_is_free_while_the_kick_waits_for_the_other_members(
+        db: SqlitePool,
+    ) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+        tokio::time::timeout(FAIL_AFTER, run.fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the kick never signed the removal"))?;
+
+        // The fake keeps the legacy mapping, so the coordinator is now waiting
+        // for it to go away. A cancel takes the lock without waiting, so the
+        // test holds it to show that nothing else does.
+        let lock = tokio::time::timeout(FAIL_AFTER, run.instance.topology_write.lock())
+            .await
+            .map_err(|_| anyhow::anyhow!("the write lock stayed held after the signing"))?;
+
+        assert!(!run.driver.is_finished(), "the run did not keep waiting");
+        drop(lock);
+        run.driver.abort();
+        Ok(())
+    }
 }

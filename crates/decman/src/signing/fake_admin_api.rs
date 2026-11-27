@@ -31,13 +31,13 @@ use canton_proto_rs::com::digitalasset::canton::{
         },
         v30::{
             CryptoKeyFormat, PublicKey, PublicKeyWithName, SigningKeySpec, SigningKeyUsage,
-            SigningPublicKey, public_key,
+            SigningKeysWithThreshold, SigningPublicKey, public_key,
         },
     },
     protocol::v30::{
         DecentralizedNamespaceDefinition, NamespaceDelegation, PartyToKeyMapping,
         PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums,
-        topology_mapping,
+        party_to_participant::HostingParticipant, topology_mapping,
     },
     topology::admin::v30::{
         AuthorizeRequest, AuthorizeResponse, BaseResult, GetIdRequest, GetIdResponse,
@@ -196,6 +196,16 @@ struct Vault {
     exported: Vec<Fingerprint>,
     topology: Topology,
     authorized: Vec<AuthorizeRequest>,
+    /// How many of the next `Authorize` requests fail as if the signing key
+    /// were not in the store yet.
+    key_not_ready: usize,
+    /// The number of `Authorize` requests recorded in `authorized`, so a test
+    /// can wait for a request instead of polling for it.
+    authorized_count: tokio::sync::watch::Sender<usize>,
+    /// While true, each `Authorize` request waits before the fake handles it.
+    authorize_held: tokio::sync::watch::Sender<bool>,
+    /// The number of `Authorize` requests that reached the fake, held or not.
+    authorize_arrivals: tokio::sync::watch::Sender<usize>,
 }
 
 /// The synchronizer's head state: each mapping in force, with its serial.
@@ -448,6 +458,13 @@ impl Vault {
 
     fn authorize(&mut self, request: AuthorizeRequest) -> Result<AuthorizeResponse, Status> {
         self.authorized.push(request.clone());
+        self.authorized_count.send_replace(self.authorized.len());
+        if self.key_not_ready > 0 {
+            self.key_not_ready -= 1;
+            return Err(Status::failed_precondition(
+                "TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE",
+            ));
+        }
         let Some(authorize_request::Type::Proposal(proposal)) = request.r#type else {
             return Err(Status::unimplemented("the fake authorizes proposals only"));
         };
@@ -497,6 +514,10 @@ impl FakeAdminApi {
             exported: Vec::new(),
             topology: Topology::default(),
             authorized: Vec::new(),
+            key_not_ready: 0,
+            authorized_count: tokio::sync::watch::Sender::new(0),
+            authorize_held: tokio::sync::watch::Sender::new(false),
+            authorize_arrivals: tokio::sync::watch::Sender::new(0),
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -554,9 +575,82 @@ impl FakeAdminApi {
             .push((serial, mapping));
     }
 
+    /// Take every legacy `PartyToKeyMapping` out of force, as another member's
+    /// completed removal does.
+    pub fn remove_party_to_key(&self) {
+        lock(&self.vault).topology.party_to_key.clear();
+    }
+
+    /// Publish `party` as a member party that already carries its keys inline
+    /// and still has a legacy `PartyToKeyMapping`, so that retiring the legacy
+    /// mapping is allowed.
+    pub fn publish_party_awaiting_key_retirement(&self, party: &CantonId) {
+        let keys = vec![
+            VaultKey::software("daml", 3).public_key,
+            VaultKey::software("daml", 4).public_key,
+        ];
+        let host = |uid: &str| HostingParticipant {
+            participant_uid: uid.to_string(),
+            permission: enums::ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        };
+        self.publish_p2p(
+            2,
+            PartyToParticipant {
+                party: party.to_string(),
+                threshold: 2,
+                participants: vec![host("node1"), host("node2")],
+                party_signing_keys: Some(SigningKeysWithThreshold {
+                    keys: keys.clone(),
+                    threshold: 2,
+                }),
+            },
+        );
+        self.publish_party_to_key(
+            1,
+            PartyToKeyMapping {
+                party: party.to_string(),
+                threshold: 2,
+                signing_keys: keys,
+            },
+        );
+    }
+
+    /// Fail the next `count` `Authorize` requests with the error Canton gives
+    /// while a signing key is not yet in its store. DecMan retries that error.
+    /// The failed requests still show in [`Self::authorized`].
+    pub fn reject_authorizations_until_key_ready(&self, count: usize) {
+        lock(&self.vault).key_not_ready = count;
+    }
+
     /// Each `Authorize` request DecMan sent, in order.
     pub fn authorized(&self) -> Vec<AuthorizeRequest> {
         lock(&self.vault).authorized.clone()
+    }
+
+    /// Wait until the fake has recorded at least `count` `Authorize` requests.
+    pub async fn wait_for_authorized(&self, count: usize) {
+        let mut recorded = lock(&self.vault).authorized_count.subscribe();
+        // The sender lives as long as the fake, so the wait cannot fail.
+        let _ = recorded.wait_for(|n| *n >= count).await;
+    }
+
+    /// Make each later `Authorize` request wait until
+    /// [`Self::release_authorizations`]. A held request is not yet recorded.
+    pub fn hold_authorizations(&self) {
+        lock(&self.vault).authorize_held.send_replace(true);
+    }
+
+    /// Let the held `Authorize` requests and all later ones go ahead.
+    pub fn release_authorizations(&self) {
+        lock(&self.vault).authorize_held.send_replace(false);
+    }
+
+    /// Wait until at least `count` `Authorize` requests reached the fake,
+    /// including the ones that [`Self::hold_authorizations`] holds.
+    pub async fn wait_for_authorize_arrivals(&self, count: usize) {
+        let mut arrived = lock(&self.vault).authorize_arrivals.subscribe();
+        let _ = arrived.wait_for(|n| *n >= count).await;
     }
 
     /// A node whose participant is this fake, following `rule` for party keys
@@ -696,6 +790,12 @@ async fn dispatch(vault: Shared, request: http::Request<Body>) -> http::Response
         }
         Some("ListAll") => unary(request, move |r: ListAllRequest| lock(&vault).list_all(r)).await,
         Some("Authorize") => {
+            let mut held = {
+                let vault = lock(&vault);
+                vault.authorize_arrivals.send_modify(|n| *n += 1);
+                vault.authorize_held.subscribe()
+            };
+            let _ = held.wait_for(|held| !*held).await;
             unary(request, move |r: AuthorizeRequest| {
                 lock(&vault).authorize(r)
             })

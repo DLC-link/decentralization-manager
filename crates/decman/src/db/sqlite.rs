@@ -1673,6 +1673,42 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn reopen_failed_workflow_run(
+        &mut self,
+        instance_name: &str,
+        updated_at: i64,
+    ) -> Result<bool> {
+        let (purging,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
+        )
+        .fetch_one(&mut **self)
+        .await?;
+        anyhow::ensure!(!purging, WORKFLOW_BLOCKED_BY_PURGE);
+        let (importing,): (bool,) =
+            sqlx::query_as("SELECT EXISTS (SELECT 1 FROM tenant_import_window)")
+                .fetch_one(&mut **self)
+                .await?;
+        anyhow::ensure!(!importing, WORKFLOW_BLOCKED_BY_IMPORT);
+
+        let moved = sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET status = 'inprogress',
+                error = NULL,
+                updated_at = ?
+            WHERE instance_name = ?
+              AND status = 'failed'
+            ",
+        )
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(moved)
+    }
+
     async fn finish_workflow_run(
         &mut self,
         instance_name: &str,
@@ -2163,6 +2199,45 @@ mod tests {
         tx.set_workflow_run_status("missing", WorkflowProgress::InProgress, None, 4)
             .await?;
         Commitable::commit(tx).await?;
+        Ok(())
+    }
+
+    /// A retry reopens only a Failed run. A run that a cancel or another retry
+    /// moved on keeps its status, so a cancelled run is never revived.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_retry_reopens_only_a_failed_run(pool: SqlitePool) -> Result {
+        for status in [
+            WorkflowProgress::Cancelled,
+            WorkflowProgress::InProgress,
+            WorkflowProgress::Completed,
+            WorkflowProgress::Idle,
+        ] {
+            let mut run = test_run("kick-1", "Kick", "Coordinator");
+            run.status = status;
+            let mut tx = pool.begin_transaction().await?;
+            tx.upsert_workflow_run(&run).await?;
+            let moved = tx.reopen_failed_workflow_run("kick-1", 5).await?;
+            Commitable::commit(tx).await?;
+            assert!(!moved, "a {status} run was reopened");
+            assert_eq!(
+                pool.get_workflow_run("kick-1").await?.unwrap().status,
+                status
+            );
+        }
+
+        let mut failed = test_run("kick-1", "Kick", "Coordinator");
+        failed.status = WorkflowProgress::Failed;
+        failed.error = Some("boom".to_string());
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&failed).await?;
+        assert!(tx.reopen_failed_workflow_run("kick-1", 6).await?);
+        // The second of two racing retries finds the run in progress.
+        assert!(!tx.reopen_failed_workflow_run("kick-1", 7).await?);
+        assert!(!tx.reopen_failed_workflow_run("missing", 7).await?);
+        Commitable::commit(tx).await?;
+        let reopened = pool.get_workflow_run("kick-1").await?.unwrap();
+        assert_eq!(reopened.status, WorkflowProgress::InProgress);
+        assert_eq!(reopened.error, None);
         Ok(())
     }
 

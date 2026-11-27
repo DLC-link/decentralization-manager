@@ -563,6 +563,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/local-party/adopt-key/execute` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
 | `/v0/tenant/unhost` | POST | Wallet-facing: asks this host to leave the party. The body names this host's own `participant_id`. The host removes only itself, with its own key |
 
+A workflow cancel (`/…/cancel`) answers 409 while the coordinator writes topology, for example at a kick submit. The run keeps going. Cancel again when the write ends.
+
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by
 [`decman-wallet`](crates/decman-wallet/README.md). A caller sends the key as

@@ -26,6 +26,33 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
     node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+    run_commands_on(node, PeerRow::in_progress(kind), commands).await
+}
+
+/// The peer's own `workflow_runs` row, as its operator left it.
+struct PeerRow {
+    kind: WorkflowKind,
+    status: &'static str,
+    dec_party_id: Option<String>,
+}
+
+impl PeerRow {
+    fn in_progress(kind: WorkflowKind) -> Self {
+        Self {
+            kind,
+            status: "inprogress",
+            dec_party_id: None,
+        }
+    }
+}
+
+/// Drive the real peer loop on `node` from a peer row in the state `row`.
+async fn run_commands_on(
+    node: NodeConfig,
+    row: PeerRow,
+    commands: Vec<Message>,
+) -> Result<PeerRun> {
+    let kind = row.kind;
     let db = crate::db::connect(&node.db_path()).await?;
     crate::db::MIGRATOR.run(&db).await?;
     let keys = NoiseKeypair::generate();
@@ -47,11 +74,14 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     sqlx::query(
         "INSERT INTO workflow_runs
          (instance_name, kind, role, status, current_step, step_index, step_total,
-          config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
-         VALUES (?, ?, 'Peer', 'inprogress', 'Active', 0, 1, '{}', '[]', '[]', 0, 0)",
+          config_json, expected_peers_json, completed_peers_json, created_at, updated_at,
+          dec_party_id)
+         VALUES (?, ?, 'Peer', ?, 'Active', 0, 1, '{}', '[]', '[]', 0, 0, ?)",
     )
     .bind(&instance)
     .bind(kind.as_str())
+    .bind(row.status)
+    .bind(row.dec_party_id)
     .execute(&db)
     .await?;
 
@@ -98,7 +128,13 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
                                 .unwrap_or_else(|| Message::new_empty(MessageType::Disconnect))
                         } else {
                             completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            Message::new_empty(MessageType::Wait)
+                            // A status update waits for an ack; other reports
+                            // take any reply.
+                            if message.msg_type == MessageType::StatusUpdate {
+                                Message::new_empty(MessageType::Ack)
+                            } else {
+                                Message::new_empty(MessageType::Wait)
+                            }
                         };
                         Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
                     }
@@ -336,5 +372,173 @@ async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
         "{reason}"
     );
     assert!(!reason.contains("Invalid message format"), "{reason}");
+    Ok(())
+}
+
+/// A fake Canton node whose party still holds the legacy key mapping, and a
+/// peer row that names that party.
+async fn awaiting_retirement(
+    status: &'static str,
+) -> Result<(
+    crate::signing::fake_admin_api::FakeAdminApi,
+    crate::signing::fake_admin_api::TestNode,
+    PeerRow,
+)> {
+    use crate::{
+        canton_id::{NAMESPACE_LENGTH, Namespace},
+        signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi},
+    };
+
+    let fake = FakeAdminApi::start(vec![]).await?;
+    let party = CantonId::new("party".to_string(), Namespace::new([7; NAMESPACE_LENGTH]));
+    fake.publish_party_awaiting_key_retirement(&party);
+    let node = fake.node(SoftwareKeys::Allowed, false).await?;
+    let row = PeerRow {
+        kind: WorkflowKind::Kick,
+        status,
+        dec_party_id: Some(party.to_string()),
+    };
+    Ok((fake, node, row))
+}
+
+/// The guard must not block a peer whose run is in progress: it signs the
+/// legacy mapping's removal and reports the step done.
+#[tokio::test]
+async fn a_peer_in_progress_signs_the_legacy_mapping_removal() -> Result {
+    use canton_proto_rs::com::digitalasset::canton::{
+        protocol::v30::enums::TopologyChangeOp, topology::admin::v30::authorize_request::Type,
+    };
+
+    let (fake, node, row) = awaiting_retirement("inprogress").await?;
+
+    let run = run_commands_on(
+        node.config.clone(),
+        row,
+        vec![Message::new_empty(MessageType::RetireLegacyKeys)],
+    )
+    .await?;
+
+    run.result?;
+    assert_eq!(run.completions, 1, "the peer did not report the step done");
+    let sent = fake.authorized();
+    let [request] = sent.as_slice() else {
+        anyhow::bail!("expected one Authorize request, got {}", sent.len());
+    };
+    let change = match request.r#type.as_ref() {
+        Some(Type::Proposal(proposal)) => Some(proposal.change),
+        _ => None,
+    };
+    assert_eq!(change, Some(TopologyChangeOp::Remove as i32));
+    Ok(())
+}
+
+/// Issue #660, peer side: a coordinator can still ask for the retirement
+/// after this peer's run left `InProgress`. The peer must sign nothing, and
+/// must give up after its retry budget instead of reporting the step done.
+#[tokio::test]
+async fn a_peer_run_not_in_progress_signs_no_legacy_mapping_removal() -> Result {
+    futures::future::try_join_all(["failed", "completed", "idle"].map(|status| async move {
+        let (fake, node, row) = awaiting_retirement(status).await?;
+
+        let run = run_commands_on(
+            node.config.clone(),
+            row,
+            vec![Message::new_empty(MessageType::RetireLegacyKeys); MAX_CONSECUTIVE_STEP_FAILURES],
+        )
+        .await?;
+
+        let error = run
+            .result
+            .as_ref()
+            .err()
+            .map(|e| format!("{e:#}"))
+            .ok_or_else(|| anyhow::anyhow!("a {status} peer run finished the retirement"))?;
+        assert!(
+            error.contains(&format!("is {status}, not in progress")),
+            "{error}"
+        );
+        assert!(fake.authorized().is_empty(), "a {status} peer run signed");
+        assert_eq!(run.completions, 0, "a {status} peer run reported success");
+        assert_eq!(run.polls.len(), MAX_CONSECUTIVE_STEP_FAILURES);
+        assert_reported(&run, WorkflowKind::Kick);
+        Ok::<(), anyhow::Error>(())
+    }))
+    .await?;
+    Ok(())
+}
+
+/// A peer whose coordinator cancelled the run stops at the next command, whatever
+/// it asks for. The peer signs nothing and does not count the command as a
+/// failed step, so its run cannot end as Failed and be retried.
+#[tokio::test]
+async fn a_cancelled_peer_stops_at_the_next_command() -> Result {
+    for command in [MessageType::RetireLegacyKeys, MessageType::SignKick] {
+        let (fake, node, row) = awaiting_retirement("cancelled").await?;
+
+        let run = run_commands_on(
+            node.config.clone(),
+            row,
+            vec![Message::new_empty(command); MAX_CONSECUTIVE_STEP_FAILURES],
+        )
+        .await?;
+
+        run.result?;
+        assert_eq!(
+            run.polls.len(),
+            1,
+            "{command:?}: a cancelled peer kept polling"
+        );
+        assert_eq!(run.completions, 0, "{command:?}: a cancelled peer reported");
+        assert!(
+            fake.authorized().is_empty(),
+            "{command:?}: a cancelled peer signed"
+        );
+        assert!(
+            run.reports.is_empty(),
+            "{command:?}: a cancelled peer reported a failure"
+        );
+    }
+    Ok(())
+}
+
+/// A cancel can land on the peer while its signing waits out a retry backoff.
+/// The next attempt must read the peer's row again and sign nothing.
+#[tokio::test]
+async fn a_peer_cancelled_during_a_retry_backoff_signs_nothing_more() -> Result {
+    let (fake, node, row) = awaiting_retirement("inprogress").await?;
+    fake.reject_authorizations_until_key_ready(1);
+    let db_path = node.config.db_path();
+
+    let cancel = async {
+        tokio::time::timeout(Duration::from_secs(20), fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the peer never tried to sign"))?;
+        // The first attempt failed, so the retry now waits out its delay.
+        let db = crate::db::connect(&db_path).await?;
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+        db.close().await;
+        Ok::<(), anyhow::Error>(())
+    };
+    let peer = run_commands_on(
+        node.config.clone(),
+        row,
+        vec![Message::new_empty(MessageType::RetireLegacyKeys)],
+    );
+    let (cancelled, run) = tokio::join!(cancel, peer);
+    cancelled?;
+    let run = run?;
+
+    // The cancel ends the run quietly. A failure would count against the retry
+    // budget and finish the run as Failed.
+    run.result?;
+    assert_eq!(run.polls.len(), 1, "the peer polled again after its cancel");
+    assert!(
+        run.reports.is_empty(),
+        "a cancelled peer reported a failure"
+    );
+    assert_eq!(fake.authorized().len(), 1, "a cancelled peer signed again");
+    assert_eq!(run.completions, 0, "a cancelled peer reported success");
     Ok(())
 }

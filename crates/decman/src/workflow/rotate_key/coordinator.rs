@@ -47,6 +47,7 @@ pub async fn start_coordinator(
         let rotate_config = rotate_config.clone();
         let db = db.clone();
         let instance_name = rotate_config.instance_name.clone();
+        let instance = instance.clone();
 
         tokio::spawn(async move {
             let mut completed = HashSet::new();
@@ -98,12 +99,19 @@ pub async fn start_coordinator(
                             workflow_state.expected_peers(),
                         )
                         .await?;
-                        submit_rotation(&node_config, &db, &instance_name, &rotate_config).await?;
+                        crate::workflow::write_topology(
+                            &db,
+                            &instance,
+                            submit_rotation(&node_config, &db, &instance_name, &rotate_config),
+                        )
+                        .await?;
                         workflow_state.advance_step().await;
                     }
                     RotateKeyStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
+                            &db,
+                            &instance,
                             &rotate_config.decentralized_party_id,
                         )
                         .await?;

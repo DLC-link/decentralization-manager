@@ -1000,20 +1000,24 @@ impl WorkflowTriggers {
                     continue;
                 }
             };
-            if let Err(e) = tx
-                .set_workflow_run_status(
-                    &run.instance_name,
-                    WorkflowProgress::InProgress,
-                    None,
-                    now,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "retry_peer_runs_from: status flip failed for {}: {e}",
-                    run.instance_name
-                );
-                continue;
+            // Conditional on Failed: a cancel that landed after the read above
+            // keeps its status, and so does a retry that another request won.
+            match tx.reopen_failed_workflow_run(&run.instance_name, now).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        "retry_peer_runs_from: {} is no longer Failed; not re-firing it",
+                        run.instance_name
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "retry_peer_runs_from: status flip failed for {}: {e}",
+                        run.instance_name
+                    );
+                    continue;
+                }
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::warn!(
@@ -2593,7 +2597,29 @@ async fn finalize_peer_run(
     } else {
         WorkflowProgress::Failed
     };
-    if let Err(e) = tx
+    // A task that ends well keeps a run that its coordinator cancelled as
+    // Cancelled: the first terminal status wins. A task that fails still
+    // records Failed. A coordinator retry reopens only Failed peer rows, so a
+    // peer that a decline's teardown cancelled can rejoin a retry that starts
+    // after its task failed.
+    if success {
+        match tx
+            .finish_workflow_run(instance_name, status, error_msg.as_deref(), now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    "finalize_peer_run: {instance_name} already has a terminal status; keeping it"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("finalize_peer_run: update failed: {e}");
+                return;
+            }
+        }
+    } else if let Err(e) = tx
         .set_workflow_run_status(instance_name, status, error_msg.as_deref(), now)
         .await
     {
@@ -3060,6 +3086,45 @@ async fn peer_payload_response(
 #[cfg(test)]
 mod tests {
     use super::{Network, ensure_insecure_allowed};
+
+    /// A peer run that its coordinator cancelled stays Cancelled when its task
+    /// ends well. A task that fails still records Failed, so a coordinator
+    /// retry can restart the peer. A run in progress takes the task's outcome.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_peer_task_that_ends_well_keeps_a_cancelled_run_cancelled(
+        pool: sqlx::SqlitePool,
+    ) -> crate::error::Result {
+        use crate::server::WorkflowProgress;
+
+        for (start, success, expected) in [
+            ("cancelled", true, WorkflowProgress::Cancelled),
+            ("cancelled", false, WorkflowProgress::Failed),
+            ("inprogress", true, WorkflowProgress::Completed),
+            ("inprogress", false, WorkflowProgress::Failed),
+        ] {
+            sqlx::query("DELETE FROM workflow_runs")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES ('peer-run', 'Kick', 'Peer', ?, 'Active', 0, 1, '{}', '[]', '[]', 0, 0)",
+            )
+            .bind(start)
+            .execute(&pool)
+            .await?;
+
+            super::finalize_peer_run(&pool, "peer-run", success, (!success).then(|| "x".into()))
+                .await;
+
+            let row = crate::db::schema::SchemaRead::get_workflow_run(&pool, "peer-run")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("row vanished"))?;
+            assert_eq!(row.status, expected, "{start} + success={success}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn insecure_allowed_on_devnet() {

@@ -434,6 +434,16 @@ pub trait Commitable {
         updated_at: i64,
     ) -> Result;
 
+    /// Flip a run from Failed back to InProgress and clear its error. Returns
+    /// whether this call moved it. `false` means the run is missing or no longer
+    /// Failed, so a cancel or another retry won and its status stays. Fails
+    /// while a purge of former-party contracts runs.
+    async fn reopen_failed_workflow_run(
+        &mut self,
+        instance_name: &str,
+        updated_at: i64,
+    ) -> Result<bool>;
+
     /// Move a run that is still Idle or InProgress to the terminal `status`.
     /// Returns whether this call moved it. `false` means a terminal status was
     /// already recorded and stays: the first terminal write wins.

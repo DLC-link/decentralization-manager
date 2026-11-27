@@ -143,6 +143,11 @@ pub struct WorkflowInstance {
     /// outbound as clients and are never routed to here). `std::sync::RwLock`
     /// so the listener clones the handle out without awaiting.
     pub active: StdRwLock<Option<ActiveWorkflow>>,
+    /// Held while the coordinator writes topology for this run. A cancel that
+    /// finds it held answers 409, because stopping a write between its two
+    /// transactions leaves the party half-migrated. The cancel holds it too,
+    /// so a write that starts after a cancel finds the run cancelled.
+    pub topology_write: tokio::sync::Mutex<()>,
 }
 
 impl WorkflowInstance {
@@ -154,6 +159,7 @@ impl WorkflowInstance {
             role,
             http: Arc::new(HttpWorkflowState::new()),
             active: StdRwLock::new(None),
+            topology_write: tokio::sync::Mutex::new(()),
         })
     }
 

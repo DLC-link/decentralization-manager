@@ -140,6 +140,27 @@ Each workflow type is modeled as a state machine with a defined step sequence. T
 3. Waits for all peer responses before advancing
 4. Executes coordinator-only steps (proposal creation, submission) locally
 
+A cancel stops a run, except while the coordinator writes topology. A submit
+can be two transactions, and a cancelled run never resumes, so a cancel in the
+middle leaves the party half-changed. The cancel endpoint answers 409 while a
+coordinator submit, the add-party clearing submit, the onboarding DNS or final
+submit, or the legacy-key signing runs, and the run goes on. The operator
+cancels again when the write ends. A cancel that wins first marks the run
+cancelled, and the write then sends nothing. This covers kick, add-party,
+change-threshold, rotate-key and onboarding.
+
+A cancel between two steps works, and a write that already landed stays. Such a
+cancel stops the later steps: for example the legacy-key retirement, or the
+rotate-key record step. The wait for the other members to finish the retirement
+is not a write, so a cancel works then too. The proposal-creation steps and the
+DAR upload are not covered, because they write outside this lock.
+
+A peer run that its coordinator cancelled stops at the next command from that
+coordinator. The coordinator sends the cancel on an operator cancel, and after
+another peer declines. The peer row stays Cancelled when its task ends
+normally, and becomes Failed when its task fails. A retry reopens only a run
+that is still Failed, on the coordinator and on its peers.
+
 ## Coordinator / Peer Model
 
 The system uses a coordinator/peer pattern for multi-party operations. Any participant can serve either role -- it is determined per-workflow, not per-node.
