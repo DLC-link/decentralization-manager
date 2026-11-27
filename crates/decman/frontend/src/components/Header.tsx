@@ -4,6 +4,7 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import { useAuth } from "../contexts";
 import { Logo, type BuildInfo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { BANNER_OFFSET } from "./VersionBanner";
 
 interface HeaderProps {
   /** Build identity for the header's hidden build-info reveal. */
@@ -17,7 +18,7 @@ export const Header = ({ buildInfo }: HeaderProps) => {
     <Box
       sx={{
         position: "fixed",
-        top: 0,
+        top: BANNER_OFFSET,
         left: 0,
         right: 0,
         zIndex: 1100,

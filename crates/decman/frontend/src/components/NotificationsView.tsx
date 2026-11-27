@@ -38,6 +38,7 @@ import { RowCard } from "./RowCard";
 import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
+import { BANNER_OFFSET } from "./VersionBanner";
 import {
   completedProposals,
   type CompletedProposal,
@@ -3018,7 +3019,7 @@ export const NotificationsView = ({
       <Box
         sx={{
           position: "sticky",
-          top: 0,
+          top: BANNER_OFFSET,
           zIndex: 5,
           pb: 1.5,
           bgcolor: "background.default",

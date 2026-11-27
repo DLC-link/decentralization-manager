@@ -118,6 +118,8 @@ const partyListCalls = () =>
 beforeEach(() => {
   fetchMock.mockReset();
   fetchMock.mockImplementation(backend);
+  // The release-policy read goes to GitHub, not the backend. Keep it offline.
+  vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
   window.matchMedia = ((query: string) => ({
     matches: false,
     media: query,

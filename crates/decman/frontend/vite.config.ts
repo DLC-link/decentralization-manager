@@ -43,6 +43,9 @@ function mockApi(): Plugin {
     'transfer-factories', 'transfer-preapprovals', 'coupon-reassignment-delegation',
     'reward-status',
     'former-parties',
+    // Not a backend route: mock mode reads the release policy from here
+    // instead of GitHub (see src/useUpgradeNotice.ts).
+    'version-policy',
   ])
   const load = (name: string): string | null => {
     const file = join(mocksDir, `${name}.json`)
@@ -103,6 +106,12 @@ export default defineConfig(({ command }) => {
       // session so the full authed UI (logout, etc.) is previewable offline.
       __MOCK__: mock,
     },
+    // `npm test` only: the version-policy test reads the repo-root policy file
+    // and the crate's Cargo.toml, which sit above the frontend root. The dev
+    // server keeps its default file access.
+    ...(process.env.VITEST && {
+      server: { fs: { allow: [join(rootDir, '..', '..', '..')] } },
+    }),
     // `npm test`. jsdom because the hooks under test render components and touch
     // the DOM (scroll containers); `include` keeps the runner off node_modules.
     test: {
