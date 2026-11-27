@@ -1,44 +1,46 @@
 version: 2
+
+# One pull request per week for the whole repo: every ecosystem joins this group.
+# Major versions are never proposed here. Security fixes do not wait for this
+# schedule, and the ignore rules below do not apply to them.
+multi-ecosystem-groups:
+  weekly:
+    schedule:
+      interval: weekly
+
 updates:
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "chore(deps)"
-    groups:
-      cargo-minor-and-patch:
-        update-types:
-          - minor
-          - patch
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      # Internal DLC-link crates: owners upgrade these on purpose, so Dependabot does not track them.
+      - dependency-name: canton-common
+      - dependency-name: canton-proto-rs
+      - dependency-name: canton-registry
+      - dependency-name: common
+      - dependency-name: hyper-noise
+      - dependency-name: keycloak
+      - dependency-name: penelope
+      - dependency-name: registry
+      - dependency-name: tokio-noise
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directories:
-      - "/crates/decman/frontend"
-      - "/e2e"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "chore(deps)"
-      prefix-development: "chore(deps-dev)"
-    groups:
-      npm-minor-and-patch:
-        update-types:
-          - minor
-          - patch
+      - /crates/decman/frontend
+      - /e2e
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "chore(ci)"
-    groups:
-      actions-all:
-        update-types:
-          - major
-          - minor
-          - patch
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
