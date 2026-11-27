@@ -875,4 +875,38 @@ mod tests {
         let result = read_first_message_from_bytes::<Timestamp>(&buf);
         assert!(result.is_err());
     }
+
+    /// The positive side of the two rejects above: what the encoder frames,
+    /// the reader gets back.
+    #[test]
+    fn length_prefixed_message_round_trips() -> Result {
+        let small = Timestamp {
+            seconds: 123_456_789,
+            nanos: 987_654_321,
+        };
+        let framed = encode_length_prefixed_message(&small);
+        assert_eq!(read_first_message_from_bytes::<Timestamp>(&framed)?, small);
+
+        // An all-default message encodes to no bytes, so its frame is the
+        // zero length alone.
+        let empty = encode_length_prefixed_message(&Timestamp::default());
+        assert_eq!(empty, vec![0]);
+        assert_eq!(
+            read_first_message_from_bytes::<Timestamp>(&empty)?,
+            Timestamp::default()
+        );
+
+        // A 300-byte payload needs a two-byte varint length.
+        let large = prost_types::Any {
+            type_url: "type.example/large".to_owned(),
+            value: vec![7; 300],
+        };
+        let framed = encode_length_prefixed_message(&large);
+        assert_ne!(framed[0] & 0x80, 0, "the length should take two bytes");
+        assert_eq!(
+            read_first_message_from_bytes::<prost_types::Any>(&framed)?,
+            large
+        );
+        Ok(())
+    }
 }
