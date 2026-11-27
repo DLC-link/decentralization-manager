@@ -142,6 +142,18 @@ fix(workflow): handled durable cancel during topology retry
 Keep commits small, focused, and atomic. Stage files intentionally
 (`git add <file>`), not `git add .`.
 
+## Releasing (maintainers)
+
+Every node's UI reads [`version-policy.json`](../version-policy.json) from
+`main` to decide whether to show an upgrade banner.
+
+- The version-bump PR sets `latest` to the new `crates/decman/Cargo.toml`
+  version. A frontend test fails the PR if the two differ.
+- Raise `minimum_supported` when a release breaks older nodes. Nodes below it
+  show an orange banner that the operator cannot dismiss.
+- Nodes between `minimum_supported` and `latest` show a yellow banner that the
+  operator can dismiss until the next release.
+
 ## Submitting a pull request
 
 1. Fork the repo and create a branch following the naming convention above.

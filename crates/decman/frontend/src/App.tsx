@@ -29,6 +29,8 @@ import { PartyDetail } from "./components/PartyDetail";
 import { FormerPartyDetail } from "./components/FormerPartyDetail";
 import { NodeHealthCard } from "./components/NodeHealthCard";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
+import { BANNER_OFFSET, VersionBanner } from "./components/VersionBanner";
+import { useUpgradeNotice } from "./useUpgradeNotice";
 import { useNodeHealth } from "./useNodeHealth";
 import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
@@ -131,6 +133,10 @@ function pollGuard(refresh: () => Promise<void>): () => void {
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
+  const upgrade = useUpgradeNotice();
+  // Small screens: the content starts below the fixed header, which itself
+  // starts below the upgrade banner.
+  const mobileTop = `calc(128px + ${BANNER_OFFSET})`;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("sidebar-collapsed") === "true",
   );
@@ -1075,7 +1081,7 @@ const App = () => {
         <Box
           sx={{
             position: "fixed",
-            top: 16,
+            top: `calc(16px + ${BANNER_OFFSET})`,
             left: `${sidebarWidth}px`,
             right: 0,
             zIndex: 1050,
@@ -1202,15 +1208,29 @@ const App = () => {
           }),
         }}
       >
+      {upgrade.notice && (
+        // Large screens pin the banner above the content. Small screens pin it
+        // above the fixed header, which moves down to make room.
+        <Box
+          sx={
+            isLargeScreen
+              ? { position: "sticky", top: 0, zIndex: 1060, flexShrink: 0 }
+              : { position: "fixed", top: 0, left: 0, right: 0, zIndex: 1101 }
+          }
+        >
+          <VersionBanner notice={upgrade.notice} onDismiss={upgrade.dismiss} />
+        </Box>
+      )}
+
       {loading && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 16 }}>
+        <Box sx={{ pt: isLargeScreen ? 4 : mobileTop }}>
           {isLargeScreen && <Box sx={{ height: 48 }} />}
           <LoadingSkeleton />
         </Box>
       )}
 
       {!loading && error && (
-        <Container maxWidth="md" sx={{ pt: isLargeScreen ? 4 : 16 }}>
+        <Container maxWidth="md" sx={{ pt: isLargeScreen ? 4 : mobileTop }}>
           <Alert severity="error" onClose={() => setError(null)}>
             {error}
           </Alert>
@@ -1218,7 +1238,7 @@ const App = () => {
       )}
 
       {!isLargeScreen && !loading && !error && (
-        <Box sx={{ pt: 16, px: 2 }}>
+        <Box sx={{ pt: mobileTop, px: 2 }}>
           <Tabs
             value={activeTab}
             onChange={(_e, v) => navigate(v)}
