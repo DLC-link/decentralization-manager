@@ -2,9 +2,9 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | These tests cover UpdateInstrumentConfiguration: the full replace, the
--- provider app reward beneficiaries kept across it, the registrar and
--- instrument id checks, the refusal when another party is the provider, and
--- the block list refusals.
+-- provider app reward beneficiaries, pause state and force transfer setting
+-- kept across it, the registrar and instrument id checks, and the block list
+-- refusals.
 module Governance.UtilityOnboarding.Test.UpdateInstrumentConfigurationTest where
 
 import Daml.Script
@@ -12,7 +12,7 @@ import Daml.Script
 import Splice.Api.FeaturedAppRightV1 (AppRewardBeneficiary(..))
 import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
 import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
-import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
+import Utility.Registry.Holding.V0.Types (ForceTransfer(..), InstrumentIdentifier(..), Paused(..))
 import Utility.Registry.V0.Configuration.Instrument
   (InstrumentConfiguration(..), InstrumentConfiguration_SetProviderAppRewardBeneficiaries(..))
 
@@ -23,7 +23,7 @@ import Governance.Rules
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
   ( DualGovFixture, ProvisionedInstrumentArtifacts(..), defaultIssuerRequirement
-  , executeContext, givenDualGovernance, setupProvisionedInstrument )
+  , givenDualGovernance, setupProvisionedInstrument )
 import Governance.UtilityOnboarding.DualDecpartyTestUtils qualified as Dual
 import Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries
 import Governance.UtilityOnboarding.TestUtils
@@ -120,8 +120,8 @@ executeMustFail f proposalCid = do
       confirmations = confirmationCids
   pure (show failure)
 
--- * Happy path: every field is replaced, and the beneficiaries survive the
--- replace. The registry's create clears them, so the action sets them again.
+-- * Happy path: every field is replaced, and the registry keeps the
+-- beneficiaries across the replace.
 
 then_replaced_and_beneficiaries_kept : Fixture -> Text -> Script Failures
 then_replaced_and_beneficiaries_kept f description = do
@@ -171,6 +171,59 @@ test_when_no_beneficiaries_then_replaced = script do
     when = executeUpdate None
     then_ = then_replaced_without_beneficiaries
 
+-- * The proposal carries neither the pause state nor the force transfer
+-- setting. The action copies both from the live configuration, so an update
+-- does not unpause an instrument, and the registry accepts the replace.
+
+given_setup_with_paused_force_transfer_configuration : Script Fixture
+given_setup_with_paused_force_transfer_configuration = do
+  f <- given_setup_done
+  let parties = f.parties
+  instrumentConfigurationCid <- submit parties.governanceParty $
+    createCmd InstrumentConfiguration with
+      operator = parties.operator
+      provider = parties.governanceParty
+      registrar = parties.governanceParty
+      defaultIdentifier = InstrumentIdentifier with
+        source = parties.governanceParty
+        id = "PAUSED-TOKEN"
+        scheme = "RegistrarInternalScheme"
+      additionalIdentifiers = []
+      issuerRequirements = []
+      holderRequirements = []
+      providerAppRewardBeneficiaries = None
+      checkBlockList = None
+      isPaused = Some Paused
+      forceTransferEnabled = Some ForceTransfer
+  pure f with artifacts = (f.artifacts with instrumentConfigurationCid)
+
+when_paused_configuration_updated : Fixture -> Script ()
+when_paused_configuration_updated f = do
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid
+    f.artifacts.instrumentConfigurationCid "PAUSED-TOKEN" None
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_pause_and_force_transfer_kept : Fixture -> () -> Script Failures
+then_pause_and_force_transfer_kept f _ = do
+  configurations <- query @InstrumentConfiguration f.parties.governanceParty
+  let replaced = filter (\(_, c) -> c.defaultIdentifier.id == "PAUSED-TOKEN") configurations
+  pure $ case replaced of
+    [(cid, configuration)] ->
+      shouldBe "configuration replaced" True (cid /= f.artifacts.instrumentConfigurationCid) <>
+      shouldBe "issuerRequirements"
+        [newIssuerRequirement f.parties] configuration.issuerRequirements <>
+      shouldBe "isPaused" (Some Paused) configuration.isPaused <>
+      shouldBe "forceTransferEnabled" (Some ForceTransfer) configuration.forceTransferEnabled
+    _ -> shouldBe "PAUSED-TOKEN configuration count" 1 (length replaced)
+
+test_when_paused_force_transfer_configuration_updated_then_both_kept = script do
+  run Test with
+    given = given_setup_with_paused_force_transfer_configuration
+    when = when_paused_configuration_updated
+    then_ = then_pause_and_force_transfer_kept
+
 -- * Refusals leave the configuration as it was.
 
 then_refused_and_unchanged : Text -> Fixture -> Text -> Script Failures
@@ -196,6 +249,7 @@ when_update_against_proposer_owned_service f = do
     provider = proposer
     registrar = proposer
     enableResultContracts = None
+    blockListInitiated = None
   proposalCid <- updateProposal f foreignServiceCid
     f.artifacts.instrumentConfigurationCid "TEST-TOKEN" None
   executeMustFail f proposalCid
@@ -240,6 +294,8 @@ when_update_foreign_configuration f = do
       holderRequirements = []
       providerAppRewardBeneficiaries = None
       checkBlockList = None
+      isPaused = None
+      forceTransferEnabled = None
   proposalCid <- updateProposal f f.artifacts.registrarServiceCid foreignCid "FOREIGN-TOKEN" None
   failure <- executeMustFail f proposalCid
   pure (foreignCid, failure)
@@ -280,6 +336,8 @@ given_setup_with_block_list_configuration = do
       holderRequirements = []
       providerAppRewardBeneficiaries = None
       checkBlockList = Some True
+      isPaused = None
+      forceTransferEnabled = None
   pure f with artifacts = (f.artifacts with instrumentConfigurationCid)
 
 updateBlockListConfiguration : Optional Bool -> Fixture -> Script Text
@@ -376,8 +434,9 @@ test_when_outsider_confirms_then_rejected = script do
     when = when_outsider_confirms
     then_ = then_nothing
 
--- * Split roles: the provider decparty is not the registrar decparty, so the
--- registrar cannot set the provider's beneficiaries again.
+-- * Split roles: the provider decparty is not the registrar decparty. The
+-- registrar decparty replaces the configuration, and the registry keeps the
+-- beneficiaries that only the provider decparty can set.
 
 data DualFixture = DualFixture
   with
@@ -419,37 +478,24 @@ dualUpdateProposal fx = do
     useBlockList = Some False
   pure (toInterfaceContractId proposalCid)
 
-when_registrar_updates_with_provider_beneficiaries : DualFixture -> Script Text
+when_registrar_updates_with_provider_beneficiaries : DualFixture -> Script ()
 when_registrar_updates_with_provider_beneficiaries fx = do
   proposalCid <- dualUpdateProposal fx
-  let stack = fx.f.registrarStack
-  confirmations <- forA [stack.member1, stack.member2] \confirmer -> do
-    result <- submit (actAs confirmer <> readAs stack.governanceParty) $
-      exerciseCmd stack.rulesCid GovernanceRules_ConfirmAction with
-        confirmer
-        actionProposalCid = proposalCid
-    pure result.confirmationCid
-  failure <- submitWithError (executeContext fx.f.parties stack) $
-    exerciseCmd stack.rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = stack.member1
-      actionProposalCid = proposalCid
-      confirmations
-  pure (show failure)
+  _ <- Dual.confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
 
-then_provider_beneficiaries_kept : DualFixture -> Text -> Script Failures
-then_provider_beneficiaries_kept fx failure = do
+then_provider_beneficiaries_kept : DualFixture -> () -> Script Failures
+then_provider_beneficiaries_kept fx _ = do
   configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
-  let configurationChecks = case configurations of
-        [(cid, configuration)] ->
-          shouldBe "configuration cid" fx.provisioned.instrumentConfigurationCid cid <>
-          shouldBe "providerAppRewardBeneficiaries"
-            (Some (providerSplit fx)) configuration.providerAppRewardBeneficiaries
-        _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
-  pure $
-    shouldContain "execution error" failure "only its provider can set them again" <>
-    configurationChecks
+  pure $ case configurations of
+    [(cid, configuration)] ->
+      shouldBe "configuration replaced" True (cid /= fx.provisioned.instrumentConfigurationCid) <>
+      shouldBe "checkBlockList" (Some False) configuration.checkBlockList <>
+      shouldBe "providerAppRewardBeneficiaries"
+        (Some (providerSplit fx)) configuration.providerAppRewardBeneficiaries
+    _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
 
-test_when_provider_is_another_party_with_beneficiaries_then_refused = script do
+test_when_provider_is_another_party_with_beneficiaries_then_replaced_and_kept = script do
   run Test with
     given = given_provisioned_with_provider_beneficiaries
     when = when_registrar_updates_with_provider_beneficiaries

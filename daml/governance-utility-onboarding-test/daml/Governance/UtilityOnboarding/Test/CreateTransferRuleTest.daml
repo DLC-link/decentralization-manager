@@ -100,6 +100,7 @@ when_create_on_proposer_owned_service f = do
     provider = proposer
     registrar = proposer
     enableResultContracts = None
+    blockListInitiated = None
   proposalCid <- createTransferRuleProposal f foreignServiceCid
   confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
     [f.parties.member1, f.parties.member2]

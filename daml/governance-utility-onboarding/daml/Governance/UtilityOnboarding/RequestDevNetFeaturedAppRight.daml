@@ -39,4 +39,6 @@ template RequestDevNetFeaturedAppRight
           provider = governanceParty
           -- None grants the default activity weight.
           activityWeight = None
+          appKind = None
+          opsParties = None
         pure ()

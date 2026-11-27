@@ -269,6 +269,7 @@ when_provision_against_proposer_owned_service fx = do
     provider = proposer
     registrar = proposer
     enableResultContracts = None
+    blockListInitiated = None
   proposalCid <- submit proposer $ createCmd ProvisionInstrument with
     governanceParty = parties.registrarGov
     proposer

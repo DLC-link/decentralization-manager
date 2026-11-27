@@ -573,7 +573,7 @@ Replace the fields of a live `InstrumentConfiguration`:
 
 The registry can only archive a configuration and create a new one, so the proposal replaces every field. DecMan refuses a request that leaves a field out. `use_block_list` must be present, as `null` or `false`. DecMan refuses `true` until #566. The vote also fails at execution when the current configuration checks a block list, because the update would turn that check off. `instrument_id_text` must match the configuration, because holdings name the instrument by it. The new configuration gets a new contract id.
 
-The create clears the provider app reward beneficiaries. The action sets them again in the same transaction, so the reward split does not change. Only the provider can set them, so the action refuses when they are set and another decparty is the provider. The Setup Utility flow makes the governance party both provider and registrar, so this case does not arise there.
+The registry keeps the provider app reward beneficiaries across the replace, so the reward split does not change. The proposal does not carry the pause state or the force transfer setting. The action copies both from the live configuration, so an update never unpauses an instrument.
 
 Credentialed issuers request mints and burns through the `AllocationFactory`. The registrar decparty approves each request with the `accept_mint_request` and `accept_burn_request` proposals.
 
