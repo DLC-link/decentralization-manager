@@ -256,6 +256,7 @@ mod tests {
                 .iter()
                 .any(|f| f == crate::consts::OWNER_ONLY_KICK)
         );
+        assert!(h.features.iter().any(|f| f == crate::consts::PER_DAR_PULL));
     }
 
     /// A peer that predates the feature list still reports its version, and

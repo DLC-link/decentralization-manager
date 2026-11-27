@@ -1,6 +1,10 @@
 pub mod bundle;
 pub mod config;
 pub mod coordinator;
+pub mod peer;
+
+#[cfg(test)]
+mod peer_tests;
 
 pub use bundle::{bundle_of, load_bundle, move_inline_dars};
 pub use config::{DarListing, DarsConfig};

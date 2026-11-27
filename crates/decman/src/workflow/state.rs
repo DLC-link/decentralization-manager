@@ -197,9 +197,9 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.command_payload.write().await = Bytes::from(payload);
     }
 
-    /// The payload to send with the command. A DAR bundle can be 16 MiB and
-    /// every peer poll and chunk request reads it, so this returns a shared
-    /// handle rather than a copy.
+    /// The payload to send with the command. A DAR bundle can take many MiB
+    /// and every peer poll and chunk request reads it, so this returns a
+    /// shared handle rather than a copy.
     pub async fn get_command_payload(&self) -> Bytes {
         self.command_payload.read().await.clone()
     }

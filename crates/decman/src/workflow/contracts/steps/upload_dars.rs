@@ -5,7 +5,12 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     upload_dar_request::UploadDarData,
 };
 
-use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
+use crate::{
+    config::NodeConfig,
+    error::Result,
+    noise::shown,
+    workflow::{contracts::DarFile, dars::peer::MAX_FIELD_LEN},
+};
 
 /// Upload DAR files to the participant
 ///
@@ -93,9 +98,12 @@ async fn upload_dar_bytes(
         synchronizer_id: None, // Auto-detect if single synchronizer
     });
 
-    tracing::info!("Uploading {filename}...");
+    // A peer's filenames come from the coordinator, so the log shows them
+    // escaped.
+    let name = shown(filename, MAX_FIELD_LEN);
+    tracing::info!("Uploading {name}...");
     client.upload_dar(request).await?;
-    tracing::info!("Successfully uploaded {filename}");
+    tracing::info!("Successfully uploaded {name}");
 
     Ok(())
 }

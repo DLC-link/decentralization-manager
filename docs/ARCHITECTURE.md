@@ -432,6 +432,10 @@ Minimum message size: 6 bytes (type + length with zero payload).
 
 Chunk size: 1 MiB (`CHUNK_SIZE`). Chunking is required for payloads exceeding `MAX_PAYLOAD_SIZE` (1 MiB). An assembled chunked response is capped at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`).
 
+A new peer does not download the chunked bundle of a Dars run. It leaves the bundle on the coordinator and pulls each DAR with `RequestDar`. The 16 MiB cap then applies to each DAR, not to the whole set. A coordinator starts a run whose bundle is above 16 MiB only when every invited peer lists `per-dar-pull`. For a DAR above 16 MiB, the coordinator announces the size and serves no chunks. The peer then names the DAR, its size and the limit.
+
+A reply to a DAR pull, or to one of its chunk fetches, may carry at most `MAX_REPLY_SIZE`: one chunk with its index, the frame header and the longest routing instance. The read stops once such a reply passes it. Other replies, such as owner keys and peer lists, go out inline whatever their size, and are read whole. So is a chunk of a workflow command, which `NoiseClient::request_chunk` fetches. Every caller reads at most 4 KiB of a refusal, which is a reply with a status other than 200. Every reply body that stalls ends at the request timeout.
+
 ### Security
 
 - **PSK derivation**: Each peer pair derives a unique PSK via secp256k1 ECDH. The coordinator's secret key and the peer's public key (or vice versa) produce a shared secret used as the Noise PSK.
@@ -481,6 +485,12 @@ Older builds refuse to sign a kick of an owner that hosts nothing. Each node
 lists the workflow features it supports in its Health reply. The coordinator
 refuses such a kick before it sends any invitation when an invited peer does
 not list `owner-only-kick`.
+
+The Health features are `owner-only-kick`, `rotate-key` and `per-dar-pull`.
+A node that lists `per-dar-pull` reads each DAR of a Dars run with
+`RequestDar`, as the DARs workflow below describes. The coordinator refuses a
+Dars run whose bundle is above 16 MiB before it sends any invitation when an
+invited peer does not list `per-dar-pull`.
 
 The kicked member is checked against the party's hosts and owners, not against
 the peer list, and it is never contacted. The coordinator invites each
@@ -568,6 +578,31 @@ run's `dars_bundle` artefact, so a waiting run holds none of them in memory,
 and listing runs never loads them. DecMan refuses to start or retry a run that
 sends a DAR to a peer while another run in progress already sends that DAR to
 that peer.
+
+The coordinator checks the sizes before it starts a run. It refuses a DAR above
+16 MiB with a 413. It also refuses a bundle above 256 MiB
+(`MAX_DAR_PULL_TOTAL`) with a 413. The bundle counts each file name and a few
+bytes per file. A bundle above 16 MiB needs every invited peer to list
+`per-dar-pull`. Otherwise the coordinator refuses the run with a 409 that names
+those peers. The request body of `POST /dars/distribute` is at most 100 MiB,
+and base64 makes the DARs a third larger. One run therefore carries about
+75 MiB of DARs.
+
+A new peer skips the bundle in step 3. It pulls each DAR with `RequestDar`, by
+its index in the invitation, when the invitation carries the coordinator's run
+instance and one hash for each DAR. Otherwise it takes the bundle.
+
+- The peer hashes each DAR on arrival and ends the run at the first one that
+  misses its pin. It checks the whole set again before any upload.
+- The peer refuses an invitation that names one DAR twice.
+- The peer adds up the sizes the coordinator announces. It ends the run once
+  they pass 256 MiB (`MAX_DAR_PULL_TOTAL`), or when one DAR is above 16 MiB.
+  For a chunked DAR it checks before it reads the chunks of that DAR. An
+  inline DAR, at most 1 MiB, arrives whole before the check.
+- The peer fetches one DAR at a time from a coordinator, because the
+  coordinator keeps one chunked answer per peer. A fetch waits at most 425
+  seconds for its turn.
+- The peer uploads the DARs in the invitation's order, on both paths.
 
 **Canton API calls:**
 - `PackageService.UploadDarFile` -- Upload DAR packages (step 3)

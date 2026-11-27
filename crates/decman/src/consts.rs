@@ -126,11 +126,33 @@ pub const OWNER_ONLY_KICK: &str = "owner-only-kick";
 /// a coordinator checks every invitee lists this first.
 pub const ROTATE_KEY: &str = "rotate-key";
 
+/// A peer reads each DAR of a Dars run with `RequestDar` and leaves the
+/// bundle on the coordinator. It pulls only when the accepted invitation
+/// carries the coordinator's run instance and one hash for each DAR; without
+/// them it takes the bundle. A coordinator checks every invitee lists this
+/// before it starts a run whose bundle is above the chunked limit.
+///
+/// The flag also implies the cap: a peer that lists it accepts at most
+/// [`MAX_DAR_PULL_TOTAL`] bytes of DARs in one run. A later change to the cap
+/// therefore needs a new feature name, so a coordinator can tell the peers
+/// apart.
+pub const PER_DAR_PULL: &str = "per-dar-pull";
+
+/// The most bytes a peer pulls for one Dars run, summed over the sizes the
+/// coordinator announces for its DARs. It is far above any real package set.
+///
+/// Each DAR stays in memory until the whole set passes its hash check. The
+/// peer refuses the run once the sum passes this cap. For a chunked DAR it
+/// checks before it reads the chunks of that DAR. An inline DAR, at most
+/// 1 MiB, arrives whole before the check. A run therefore holds at most this
+/// many DAR bytes plus one reply of at most `noise::MAX_REPLY_SIZE`.
+pub const MAX_DAR_PULL_TOTAL: usize = 256 * 1024 * 1024;
+
 /// Workflow features this build supports beyond [`MIN_PEER_VERSION`]. The
 /// Health reply lists them, so a coordinator can refuse a run that a peer
 /// would refuse, before it invites anyone. Every build reports the same
 /// version until a release bumps it, so the version cannot tell them apart.
-pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK, ROTATE_KEY];
+pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK, ROTATE_KEY, PER_DAR_PULL];
 
 /// Retry budget for the peer's decline notification to the coordinator.
 ///

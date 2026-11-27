@@ -10,7 +10,6 @@ use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{MAX_CHUNKED_TOTAL_SIZE, NoiseError},
     server::{WorkflowProgress, WorkflowRun},
     utils,
     workflow::{
@@ -33,24 +32,16 @@ pub fn bundle_of(mut files: Vec<(String, Vec<u8>)>) -> Vec<u8> {
 
 /// Read the DARs that run `instance_name` distributes.
 ///
+/// The start handler checks the sizes of the set and of each DAR, and each
+/// peer checks them again, so this read does not.
+///
 /// # Errors
 ///
-/// When the run has no bundle, or the bundle is larger than a peer accepts.
-/// The start handler refuses such a set, so the size check catches only a run
-/// from a release without that check.
+/// When the run has no bundle.
 pub async fn load_bundle(db: &SqlitePool, instance_name: &str) -> Result<Vec<u8>> {
-    let bundle = db
-        .read_artifact(instance_name, artifact_kinds::DARS_BUNDLE, None)
+    db.read_artifact(instance_name, artifact_kinds::DARS_BUNDLE, None)
         .await?
-        .with_context(|| format!("run {instance_name} has no DARs stored"))?;
-    if bundle.len() > MAX_CHUNKED_TOTAL_SIZE {
-        return Err(NoiseError::PayloadTooLarge {
-            size: bundle.len(),
-            limit: MAX_CHUNKED_TOTAL_SIZE,
-        }
-        .into());
-    }
-    Ok(bundle)
+        .with_context(|| format!("run {instance_name} has no DARs stored"))
 }
 
 /// The persisted config of a DAR run from a release that kept the DAR bytes
@@ -143,7 +134,7 @@ fn can_still_send(run: &WorkflowRun) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::MIGRATOR;
+    use crate::{db::MIGRATOR, noise::MAX_CHUNKED_TOTAL_SIZE};
 
     /// Insert a coordinator DAR run the way an older release wrote it: the DAR
     /// bytes inline in `config_json`.
@@ -237,33 +228,21 @@ mod tests {
         Ok(())
     }
 
+    /// A peer that lists `per-dar-pull` reads each DAR on its own, so a run
+    /// may hold more than one chunked transfer carries.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_bundle_over_the_limit_is_refused(db: SqlitePool) -> Result {
-        insert_inline_run(&db, "at-limit", "inprogress", &[]).await?;
-        insert_inline_run(&db, "over-limit", "inprogress", &[]).await?;
-        for (instance, len) in [
-            ("at-limit", MAX_CHUNKED_TOTAL_SIZE),
-            ("over-limit", MAX_CHUNKED_TOTAL_SIZE + 1),
-        ] {
-            db.write_artifact(instance, artifact_kinds::DARS_BUNDLE, None, &vec![0; len])
-                .await?;
-        }
+    async fn a_bundle_above_the_chunked_limit_loads(db: SqlitePool) -> Result {
+        let len = MAX_CHUNKED_TOTAL_SIZE + 1;
+        insert_inline_run(&db, "above-limit", "inprogress", &[]).await?;
+        db.write_artifact(
+            "above-limit",
+            artifact_kinds::DARS_BUNDLE,
+            None,
+            &vec![0; len],
+        )
+        .await?;
 
-        assert_eq!(
-            load_bundle(&db, "at-limit").await?.len(),
-            MAX_CHUNKED_TOTAL_SIZE
-        );
-        let Err(error) = load_bundle(&db, "over-limit").await else {
-            anyhow::bail!("a bundle one byte over the limit must fail");
-        };
-        assert!(
-            matches!(
-                error.downcast_ref::<NoiseError>(),
-                Some(NoiseError::PayloadTooLarge { size, limit })
-                    if *size == MAX_CHUNKED_TOTAL_SIZE + 1 && *limit == MAX_CHUNKED_TOTAL_SIZE
-            ),
-            "{error:#}"
-        );
+        assert_eq!(load_bundle(&db, "above-limit").await?.len(), len);
         Ok(())
     }
 }

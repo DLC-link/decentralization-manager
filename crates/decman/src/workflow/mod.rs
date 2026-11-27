@@ -42,6 +42,7 @@ use crate::{
     server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
+        dars::peer::{DarPull, PullRefused, in_invitation_order},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
         validation::PeerExpectations,
@@ -294,6 +295,12 @@ pub async fn start_peer(
     let coordinator_id = coordinator.participant_id.clone();
     let expectations =
         PeerExpectations::load(&db, &instance_name, &node_config, &coordinator_id).await?;
+    let dar_pull = DarPull::new(
+        &coordinator,
+        &coordinator_instance,
+        &expectations.dar_filenames,
+        &expectations.dar_hashes,
+    );
 
     let client = NoiseClient::new(
         node_config.clone(),
@@ -306,15 +313,22 @@ pub async fn start_peer(
 
     let kind = expectations.kind;
     let reporter = client.clone();
-    let result = run_peer(
-        node_config,
-        client,
-        db,
-        instance_name,
-        expectations,
-        workflow_auth,
-    )
-    .await;
+    // A refused pull is reported like any failure of the run.
+    let result = match dar_pull {
+        Ok(dar_pull) => {
+            run_peer(
+                node_config,
+                client,
+                db,
+                instance_name,
+                expectations,
+                dar_pull,
+                workflow_auth,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
     if let Err(e) = &result {
         let report = DeclineInvitationPayload {
             kind,
@@ -335,9 +349,13 @@ async fn run_peer(
     db: SqlitePool,
     instance_name: String,
     expectations: PeerExpectations,
+    dar_pull: Option<DarPull>,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     let peer_kind = expectations.kind;
+    // A peer that can read each DAR by index leaves the bundle on the
+    // coordinator, so the chunked limit applies to one DAR, not the set.
+    let left_on_coordinator = dar_pull.as_ref().map(|_| MessageType::UploadDars);
 
     // Command polling loop
     let mut consecutive_errors = 0;
@@ -346,7 +364,10 @@ async fn run_peer(
     let mut consecutive_upload_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
-        let message = match client.get_next_command_with_payload().await {
+        let message = match client
+            .get_next_command_leaving_chunks(left_on_coordinator)
+            .await
+        {
             Ok(msg) => {
                 consecutive_errors = 0; // Reset error count on success
                 consecutive_no_workflow = 0;
@@ -475,17 +496,36 @@ async fn run_peer(
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
 
-                // Decode DAR files from payload and upload directly
-                let dar_files = if payload.is_empty() {
-                    Vec::new()
-                } else {
-                    match utils::decode_files(&payload) {
+                // Decode DAR files from payload and upload directly. Without a
+                // payload, the peer reads each DAR the invitation names.
+                let mut dar_files = match (&dar_pull, payload.is_empty()) {
+                    (Some(pull), true) => match pull.fetch_all(&node_config).await {
+                        Ok(files) => files,
+                        // The coordinator serves the same DARs on every
+                        // attempt, so a retry only delays the report.
+                        Err(e) if e.downcast_ref::<PullRefused>().is_some() => {
+                            anyhow::bail!("Peer failed on the coordinator's DARs: {e:#}");
+                        }
+                        Err(e) => {
+                            fail_step!("Failed to read the DARs from the coordinator: {e:#}");
+                            continue;
+                        }
+                    },
+                    // The invitation does not change, so neither does this.
+                    (None, true) if !expectations.dar_filenames.is_empty() => {
+                        anyhow::bail!(
+                            "Peer failed on the coordinator's DARs: {}",
+                            PullRefused::NotPullable
+                        );
+                    }
+                    (None, true) => Vec::new(),
+                    (_, false) => match utils::decode_files(&payload) {
                         Ok(files) => files,
                         Err(e) => {
                             fail_step!("Failed to decode DARs from coordinator: {e}");
                             continue;
                         }
-                    }
+                    },
                 };
 
                 // Vetting a DAR makes this participant willing to execute its
@@ -494,6 +534,7 @@ async fn run_peer(
                     fail_step!("Refusing the coordinator's DARs: {e}");
                     continue;
                 }
+                in_invitation_order(&mut dar_files, &expectations.dar_filenames);
 
                 if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     fail_step!("Step execution failed: {e}");

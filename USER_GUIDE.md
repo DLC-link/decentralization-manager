@@ -120,11 +120,19 @@ For P2P to work, the Noise port must be reachable by the other participants.
 
 ## Limits
 
-A DAR distribution run carries at most 16 MiB to each peer. The file names
-and a few bytes per file count toward the limit. DecMan refuses a larger set
-before it sends any invitation. Send such a set in several runs, each within
-the limit. Each run sends the peer its own invitation. A single DAR above the
-limit cannot be distributed. Upload it to each node separately instead.
+One DAR in a distribution run can take at most 16 MiB. DecMan refuses a
+larger DAR before it sends any invitation. Upload such a DAR to each node
+separately instead.
+
+One run carries about 75 MiB of DARs in total. The request body is at most
+100 MiB, and base64 makes the DARs a third larger. Send a larger set in several
+runs. Each run sends the peer its own invitation.
+
+A set above 16 MiB needs every invited peer to run a DecMan version that pulls
+each DAR on its own. When a peer runs an older version, DecMan refuses the run
+before it sends any invitation. The refusal names those peers. Upgrade them, or
+send the files in several runs of at most 16 MiB each. The file names and a few
+bytes per file count toward those 16 MiB.
 
 A DAR distribution run waits for every invited peer to accept its invitation.
 The run fails if a peer has not joined within 72 hours. Retry it after the
