@@ -105,6 +105,23 @@ describe("governance dialog menus", { timeout: 20_000 }, () => {
     },
   );
 
+  it("shows no proposal form in the actions view", async () => {
+    renderDialog({});
+
+    await typeSelect();
+    expect(screen.getAllByText("Action Type").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Proposal Type")).toBeNull();
+  });
+
+  it("shows only the proposal form in the proposals view", async () => {
+    renderDialog({ view: "proposals" });
+
+    expect(screen.getByRole("heading", { name: "New Proposal" })).toBeTruthy();
+    await typeSelect();
+    expect(screen.getAllByText("Proposal Type").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Action Type")).toBeNull();
+  });
+
   // The full list, so a mint, burn or provision_provider_service entry, or
   // any other change to the menu, fails here.
   it("lists the same proposal types, with no mint, burn or provision entry", async () => {
