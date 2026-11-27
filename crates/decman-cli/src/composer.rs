@@ -757,11 +757,16 @@ mod tests {
 
     #[test]
     fn action_types_are_the_four_self_management_actions() {
-        let core = action_types();
-        assert_eq!(core.len(), 4);
-        assert!(
-            core.iter()
-                .all(|option| option.key.starts_with("governance_"))
+        // In the web menu's order. The TUI has no disclosure observers form.
+        let keys: Vec<_> = action_types().iter().map(|option| option.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "governance_add_member",
+                "governance_remove_member",
+                "governance_set_threshold",
+                "governance_set_timeout",
+            ]
         );
 
         // The paid-credential proposals are web-only.

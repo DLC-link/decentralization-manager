@@ -3569,6 +3569,50 @@ mod tests {
         assert_eq!(cids, vec!["a".to_owned(), "b".to_owned()]);
     }
 
+    fn party_with_templates(templates: &[&str]) -> DecentralizedParty {
+        let mut party = party("gov");
+        party.contracts = templates
+            .iter()
+            .enumerate()
+            .map(|(i, template)| common::types::ContractInfo {
+                contract_id: format!("00c{i}"),
+                template_id: (*template).to_owned(),
+                package_id: "#pkg".to_owned(),
+                package_name: String::new(),
+                package_version: String::new(),
+                created_at: String::new(),
+            })
+            .collect();
+        party
+    }
+
+    /// The governance overlay, and so the composer, opens only for a party
+    /// this classifies. It never yields anything but core_self, which is why
+    /// the composer offers only the self-management actions.
+    #[test]
+    fn party_governance_type_is_core_self_or_none() {
+        let rules = "Governance.Rules:GovernanceRules";
+        assert_eq!(
+            party_governance_type(&party_with_templates(&[rules])),
+            Some("core_self")
+        );
+        assert_eq!(
+            party_governance_type(&party_with_templates(&[
+                "CBTC.Governance:CBTCGovernanceRules",
+                rules
+            ])),
+            Some("core_self")
+        );
+        for other in [
+            "CBTC.Governance:CBTCGovernanceRules",
+            "Governance:GovernanceRules",
+            "Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory",
+        ] {
+            assert_eq!(party_governance_type(&party_with_templates(&[other])), None);
+        }
+        assert_eq!(party_governance_type(&party_with_templates(&[])), None);
+    }
+
     #[test]
     fn filter_parties_matches_name_case_insensitively() {
         let parties = [
