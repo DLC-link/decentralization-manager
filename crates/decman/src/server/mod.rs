@@ -3015,28 +3015,24 @@ async fn peer_payload_response(
         return inline(payload);
     };
 
-    // Symmetric with the client's `MAX_CHUNKED_TOTAL_SIZE`: keeps the per-peer
-    // cache bounded and the `usize → u32` casts below honest.
+    // A size that does not fit the metadata is far above any limit.
+    let total_size = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_SIZE)).unwrap_or(u32::MAX);
+    // Above the client's `MAX_CHUNKED_TOTAL_SIZE`, the announcement alone
+    // tells the client the size, and the client refuses it before it fetches
+    // a chunk. Nothing is cached, so the per-peer cache stays bounded.
     if payload.len() > MAX_CHUNKED_TOTAL_SIZE {
-        tracing::error!(
-            "{what} is {} bytes; exceeds chunked cap {} — refusing to chunk",
+        tracing::warn!(
+            "{what} is {} bytes; exceeds chunked cap {}. Announcing the size without \
+             serving chunks.",
             payload.len(),
             MAX_CHUNKED_TOTAL_SIZE,
         );
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-        return response;
-    }
-
-    // Casts are infallible against the cap checked just above.
-    let total_size = payload.len() as u32;
-    let chunk_count = payload.len().div_ceil(CHUNK_SIZE) as u32;
-    tracing::info!(
-        "{what} too large ({total_size} bytes), chunking into {chunk_count} \
-         chunks for peer {pk}",
-    );
-
-    {
+    } else {
+        tracing::info!(
+            "{what} too large ({total_size} bytes), chunking into {chunk_count} \
+             chunks for peer {pk}",
+        );
         let mut cache = cache.lock().await;
         cache.retain(|_, (_, t)| t.elapsed() < PEER_CHUNK_CACHE_TTL);
         cache.insert(pk.to_owned(), (payload, Instant::now()));
@@ -3077,12 +3073,16 @@ mod tests {
     }
 
     mod serving_a_dar_to_a_peer {
-        use super::super::dar_for_invited_peer;
+        use super::super::{PeerChunkCache, dar_for_invited_peer, peer_payload_response};
         use crate::{
             canton_id::CantonId,
             db::{
                 MIGRATOR,
                 schema::{Commitable, SchemaRead, SchemaWrite},
+            },
+            noise::{
+                CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NoiseError,
+                check_chunked_metadata, parse_chunked_command_metadata,
             },
             server::types::{
                 RequestDarPayload, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
@@ -3353,6 +3353,55 @@ mod tests {
             .await;
 
             assert!(refused.is_err(), "there is no DAR at index 7");
+            Ok(())
+        }
+
+        /// What `peer_payload_response` announces for `size` bytes, and how
+        /// many payloads it left in the per-peer cache.
+        async fn announce(size: usize) -> anyhow::Result<((MessageType, usize, usize), usize)> {
+            let cache = PeerChunkCache::default();
+            let response =
+                peer_payload_response(vec![7; size], Some("peer-key"), &cache, "Requested DAR")
+                    .await;
+            assert_eq!(response.status(), hyper::StatusCode::OK);
+            let body = hyper::body::to_bytes(response.into_body()).await?;
+            let message = Message::from_bytes(&body)?;
+            assert_eq!(message.msg_type, MessageType::ChunkedCommand);
+            let announced = parse_chunked_command_metadata(&message.payload)?;
+            let cached = cache.lock().await.len();
+            Ok((announced, cached))
+        }
+
+        /// The peer reads the size from the announcement and names the DAR,
+        /// its size and the limit. An empty 500 told it nothing.
+        #[tokio::test]
+        async fn a_dar_above_the_chunked_limit_is_announced_but_not_cached() -> anyhow::Result<()> {
+            let size = MAX_CHUNKED_TOTAL_SIZE + 1;
+
+            let ((kind, announced, chunks), cached) = announce(size).await?;
+
+            assert_eq!(kind, MessageType::Data);
+            assert_eq!(announced, size);
+            assert_eq!(chunks, size.div_ceil(CHUNK_SIZE));
+            assert!(
+                matches!(
+                    check_chunked_metadata(announced, chunks),
+                    Err(NoiseError::PayloadTooLarge { size: s, limit })
+                        if s == size && limit == MAX_CHUNKED_TOTAL_SIZE
+                ),
+                "the peer must refuse the announcement by its size"
+            );
+            assert_eq!(cached, 0, "a DAR no peer can fetch must not be cached");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn a_dar_at_the_chunked_limit_is_cached_for_its_chunks() -> anyhow::Result<()> {
+            let ((_, announced, chunks), cached) = announce(MAX_CHUNKED_TOTAL_SIZE).await?;
+
+            assert_eq!(announced, MAX_CHUNKED_TOTAL_SIZE);
+            assert!(check_chunked_metadata(announced, chunks).is_ok());
+            assert_eq!(cached, 1);
             Ok(())
         }
     }
