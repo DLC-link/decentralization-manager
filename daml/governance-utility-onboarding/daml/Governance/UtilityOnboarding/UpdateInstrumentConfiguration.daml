@@ -5,12 +5,11 @@
 --
 -- The registry has no setter for these fields. Its only update path archives
 -- the configuration and creates a new one from a full payload, so this
--- proposal carries every field. That create always clears the provider app
--- reward beneficiaries, so the action sets them again in the same
--- transaction.
+-- proposal carries every field. The pause state and the force transfer
+-- setting are not part of the proposal: the action copies both from the live
+-- configuration, so an update never unpauses an instrument, and the registry
+-- refuses any change to the force transfer setting.
 module Governance.UtilityOnboarding.UpdateInstrumentConfiguration where
-
-import DA.Foldable (forA_)
 
 import Splice.Util (require)
 import Utility.Credential.V0.Credential (PartyCredentialRequirement)
@@ -19,9 +18,7 @@ import Utility.Registry.App.V0.Service.Registrar
   , RegistrarService_ArchiveAndCreateInstrumentConfiguration(..)
   , RegistrarService_CreateInstrumentConfiguration(..) )
 import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
-import Utility.Registry.V0.Configuration.Instrument
-  ( InstrumentConfiguration
-  , InstrumentConfiguration_SetProviderAppRewardBeneficiaries(..) )
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
@@ -75,12 +72,7 @@ template UpdateInstrumentConfiguration
         -- block list check off. Refuse until #566 lifts that guard.
         require "UpdateInstrumentConfiguration: the configuration checks a block list, and this update would turn that check off"
           (current.checkBlockList /= Some True)
-        -- Only the provider can set the beneficiaries again. Refuse rather
-        -- than clear them when the provider is another party.
-        forA_ current.providerAppRewardBeneficiaries \_ ->
-          require "UpdateInstrumentConfiguration: the configuration has provider app reward beneficiaries, and only its provider can set them again"
-            (current.provider == governanceParty)
-        result <- exercise registrarServiceCid RegistrarService_ArchiveAndCreateInstrumentConfiguration with
+        _ <- exercise registrarServiceCid RegistrarService_ArchiveAndCreateInstrumentConfiguration with
           cid = instrumentConfigurationCid
           payload = RegistrarService_CreateInstrumentConfiguration with
             instrumentId = instrumentIdText
@@ -88,9 +80,6 @@ template UpdateInstrumentConfiguration
             issuerRequirements
             holderRequirements
             useBlockList
-        -- The create sets providerAppRewardBeneficiaries to None, which gives
-        -- the provider's share of app rewards to the provider alone.
-        forA_ current.providerAppRewardBeneficiaries \_ ->
-          exercise result.createResult.instrumentConfigurationCid
-            InstrumentConfiguration_SetProviderAppRewardBeneficiaries with
-              providerAppRewardBeneficiaries = current.providerAppRewardBeneficiaries
+            isPaused = current.isPaused
+            forceTransferEnabled = current.forceTransferEnabled
+        pure ()

@@ -70,4 +70,6 @@ template SetupUtility
           issuerRequirements = []
           holderRequirements = []
           useBlockList
+          isPaused = None
+          forceTransferEnabled = None
         pure ()

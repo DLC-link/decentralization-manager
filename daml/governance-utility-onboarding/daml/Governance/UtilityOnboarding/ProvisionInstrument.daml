@@ -91,6 +91,8 @@ template ProvisionInstrument
           issuerRequirements
           holderRequirements
           useBlockList
+          isPaused = None
+          forceTransferEnabled = None
         forA_ initialInstrumentIssuers $ \instrumentIssuer ->
           mintCredentialsMeetingRequirements
             governanceParty instrumentIssuer

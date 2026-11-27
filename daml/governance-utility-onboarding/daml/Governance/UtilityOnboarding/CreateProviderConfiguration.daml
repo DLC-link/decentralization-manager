@@ -2,8 +2,8 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | The provider decparty creates its ProviderConfiguration. The configuration
--- records the credentials a registrar must hold, and the credentials a holder
--- must hold.
+-- records the credentials a registrar must hold. The registry no longer uses
+-- holder requirements and refuses any that are not the empty list.
 --
 -- The provider decparty runs this action once, when it sets up the platform.
 module Governance.UtilityOnboarding.CreateProviderConfiguration where
@@ -28,7 +28,10 @@ template CreateProviderConfiguration
     observer governanceParty
     -- We don't allow any claimless self-issued (issuer=holder) requirements, as they will later translate
     -- into credentials that have no subject (as subject is marked on only the claims in this case).
+    -- The registry refuses non-empty holderRequirements at execution. Refuse
+    -- them here too, so the proposal fails before anyone votes on it.
     ensure selfIssuedRequirementsHaveClaims governanceParty registrarRequirements
+        && null holderRequirements
 
     interface instance GovernableAction for CreateProviderConfiguration where
       view = GovernableActionView with

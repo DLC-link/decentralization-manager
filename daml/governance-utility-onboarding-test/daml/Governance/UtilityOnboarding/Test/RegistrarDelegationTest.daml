@@ -48,6 +48,7 @@ createHolding parties owner amount =
       label = ""
       amount
       lock = None
+      forceTransferEnabled = None
 
 -- Create the delegation directly. Task 2 covers the governance-vote route that
 -- creates it in production.
